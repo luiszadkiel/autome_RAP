@@ -165,6 +165,8 @@ export interface PageSnapshot {
     fullHtml?: string;
     /** Text representation for AI */
     textRepresentation: string;
+    /** Hash of the DOM state for loop detection */
+    domHash?: string;
 }
 
 export interface VisionSnapshot {

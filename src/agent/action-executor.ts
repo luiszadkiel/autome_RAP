@@ -61,7 +61,19 @@ export class ActionExecutor {
                     if (!action.value) throw new Error('type requires value');
                     // Handle credential substitution
                     let valueToType = action.value;
-                    if (this.credentials) {
+
+                    // Smart credential injection based on element type
+                    if (this.credentials && element && element.attributes) {
+                        const type = element.attributes.type?.toLowerCase();
+                        if (type === 'password' && this.credentials.password) {
+                            valueToType = this.credentials.password;
+                        } else if ((type === 'email' || element.name.toLowerCase().includes('email')) && this.credentials.email) {
+                            valueToType = this.credentials.email;
+                        }
+                    }
+
+                    // Fallback to text matching if not resolved by element type
+                    if (this.credentials && valueToType === action.value) {
                         if (action.value === '[PASSWORD]' || action.value.toLowerCase().includes('password')) {
                             valueToType = this.credentials.password || action.value;
                         } else if (action.value === '[EMAIL]' || action.value === '[USERNAME]') {

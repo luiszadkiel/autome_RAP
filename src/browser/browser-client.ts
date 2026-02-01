@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Browser Client - Controls Chromium browser via Playwright
  */
 
@@ -7,6 +7,90 @@ import { join } from 'path';
 import type { BrowserConfig, PageSnapshot, SnapshotElement, VisionSnapshot } from '../core/types.js';
 import { FastElementFinder, type SelectorStrategy } from './fast-element-finder.js';
 import { EnhancedSnapshot } from './enhanced-snapshot.js';
+
+// Script envuelto en IIFE para evitar "Illegal return statement"
+const SNAPSHOT_SCRIPT = `
+(() => {
+    const results = [];
+    let refCounter = 1;
+
+    function getUniqueSelector(el) {
+        if (el.id) return '#' + el.id;
+        
+        const name = el.getAttribute('name');
+        if (name) return '[name="' + name + '"]';
+        
+        const dataTestId = el.getAttribute('data-testid');
+        if (dataTestId) return '[data-testid="' + dataTestId + '"]';
+        
+        const tag = el.tagName.toLowerCase();
+        const parent = el.parentElement;
+        if (parent) {
+            const siblings = Array.from(parent.children).filter(c => c.tagName === el.tagName);
+            if (siblings.length > 1) {
+                const index = siblings.indexOf(el) + 1;
+                return tag + ':nth-of-type(' + index + ')';
+            }
+        }
+        return tag;
+    }
+
+    function getXPath(el) {
+        const parts = [];
+        let current = el;
+        
+        while (current && current.nodeType === Node.ELEMENT_NODE) {
+            let index = 1;
+            let sibling = current.previousElementSibling;
+            while (sibling) {
+                if (sibling.tagName === current.tagName) index++;
+                sibling = sibling.previousElementSibling;
+            }
+            parts.unshift(current.tagName.toLowerCase() + '[' + index + ']');
+            current = current.parentElement;
+        }
+        return '/' + parts.join('/');
+    }
+
+    const interactiveSelectors = [
+        'button', 'a[href]', 'input', 'textarea', 'select',
+        '[role="button"]', '[role="link"]', '[onclick]'
+    ];
+
+    for (const selector of interactiveSelectors) {
+        const nodeList = document.querySelectorAll(selector);
+        for (let i = 0; i < Math.min(nodeList.length, 30); i++) {
+            const el = nodeList[i];
+            const rect = el.getBoundingClientRect();
+            
+            if (rect.width === 0 || rect.height === 0) continue;
+            if (rect.top > window.innerHeight || rect.bottom < 0) continue;
+
+            const text = el.textContent?.trim().slice(0, 50) || '';
+            const ariaLabel = el.getAttribute('aria-label') || '';
+            const placeholder = el.getAttribute('placeholder') || '';
+            const elName = ariaLabel || text || placeholder || el.getAttribute('name') || '';
+
+            if (!elName) continue;
+
+            results.push({
+                ref: 'e' + refCounter++,
+                role: el.getAttribute('role') || el.tagName.toLowerCase(),
+                name: elName,
+                selector: getUniqueSelector(el),
+                xpath: getXPath(el),
+                attributes: {
+                    type: el.getAttribute('type') || '',
+                    placeholder: placeholder,
+                },
+                isInteractive: true,
+            });
+        }
+    }
+    
+    return results;
+})()
+`;
 
 export class BrowserClient {
     private browser: Browser | null = null;
@@ -71,88 +155,16 @@ export class BrowserClient {
     async takeSnapshot(): Promise<PageSnapshot> {
         if (!this.page) throw new Error('Browser not launched');
 
-        let url: string;
-        try {
-            url = this.page.url();
-        } catch (error) {
-            throw new Error('Page has been closed or navigated away');
-        }
-
-        const title = await this.page.title().catch(() => 'Unknown Title');
+        const url = this.page.url();
+        const title = await this.page.title();
         const timestamp = new Date().toISOString();
 
-        // Build elements list by querying interactive elements
-        const elements: SnapshotElement[] = [];
-        let refCounter = 1;
+        // Get elements with UNIQUE selectors using IIFE script
+        const elements: SnapshotElement[] = await this.page.evaluate(SNAPSHOT_SCRIPT) as SnapshotElement[];
 
-        try {
-            // Find all interactive elements
-            const interactiveSelectors = [
-                'button',
-                'a[href]',
-                'input',
-                'textarea',
-                'select',
-                '[role="button"]',
-                '[role="link"]',
-                '[role="textbox"]',
-                '[role="checkbox"]',
-                '[role="radio"]',
-                '[role="combobox"]',
-                '[role="menuitem"]',
-                '[role="tab"]',
-                '[onclick]',
-            ];
-
-            for (const selector of interactiveSelectors) {
-                try {
-                    const locators = await this.page.locator(selector).all();
-                    for (const locator of locators.slice(0, 50)) { // Limit per type
-                        try {
-                            const isVisible = await locator.isVisible().catch(() => false);
-                            if (!isVisible) continue;
-
-                            const tagName = await locator.evaluate(el => el.tagName.toLowerCase()).catch(() => 'unknown');
-                            const role = await locator.getAttribute('role') || this.getDefaultRole(tagName, selector);
-                            const name = await this.getElementName(locator);
-                            const type = await locator.getAttribute('type') || '';
-
-                            if (!name && !type) continue; // Skip unnamed elements
-
-                            elements.push({
-                                ref: `e${refCounter++}`,
-                                role,
-                                name: name || type || tagName,
-                                selector: selector,
-                                attributes: {
-                                    type,
-                                    placeholder: await locator.getAttribute('placeholder') || '',
-                                },
-                                isInteractive: true,
-                            });
-                        } catch {
-                            // Skip elements that error
-                        }
-                    }
-                } catch {
-                    // Selector not found, continue
-                }
-            }
-        } catch (e) {
-            console.warn('Error collecting elements:', e);
-            // Return what we have
-        }
-
-        // Build text representation for AI
         const textRepresentation = this.buildTextRepresentation(elements, url, title);
 
-        return {
-            url,
-            title,
-            timestamp,
-            elements,
-            textRepresentation,
-        };
+        return { url, title, timestamp, elements, textRepresentation };
     }
 
     /**
@@ -199,27 +211,21 @@ export class BrowserClient {
      */
     private async getElementName(locator: any): Promise<string> {
         try {
-            // Try aria-label first
             const ariaLabel = await locator.getAttribute('aria-label');
             if (ariaLabel) return ariaLabel;
 
-            // Try title
             const titleAttr = await locator.getAttribute('title');
             if (titleAttr) return titleAttr;
 
-            // Try inner text (for buttons, links)
             const text = await locator.innerText().catch(() => '');
             if (text && text.length < 100) return text.trim();
 
-            // Try placeholder (for inputs)
             const placeholder = await locator.getAttribute('placeholder');
             if (placeholder) return placeholder;
 
-            // Try name attribute
             const nameAttr = await locator.getAttribute('name');
             if (nameAttr) return nameAttr;
 
-            // Try id
             const id = await locator.getAttribute('id');
             if (id) return id;
 
@@ -228,7 +234,6 @@ export class BrowserClient {
             return '';
         }
     }
-
 
     /**
      * Build text representation of page for AI
@@ -245,17 +250,8 @@ export class BrowserClient {
             if (el.isInteractive) {
                 let line = `[${el.ref}] ${el.role}`;
                 if (el.name) line += `: "${el.name}"`;
-                if (el.attributes.value) line += ` (value: "${el.attributes.value}")`;
+                if (el.attributes.type) line += ` (type: ${el.attributes.type})`;
                 lines.push(line);
-            }
-        }
-
-        // Also add non-interactive but named elements for context
-        const namedNonInteractive = elements.filter(e => !e.isInteractive && e.name);
-        if (namedNonInteractive.length > 0) {
-            lines.push('', 'Other Elements:');
-            for (const el of namedNonInteractive.slice(0, 20)) { // Limit to avoid token overload
-                lines.push(`[${el.ref}] ${el.role}: "${el.name}"`);
             }
         }
 
@@ -296,14 +292,12 @@ export class BrowserClient {
 
     /**
      * Click an element by ref
-     * Handles new tabs/popups automatically
      */
     async click(ref: string, elementData?: SnapshotElement): Promise<void> {
         if (!this.page || !this.context) throw new Error('Browser not launched');
 
         let element = elementData;
 
-        // If no element data provided, look it up (legacy mode)
         if (!element) {
             const snapshot = await this.takeSnapshot();
             element = snapshot.elements.find(e => e.ref === ref);
@@ -313,7 +307,6 @@ export class BrowserClient {
             throw new Error(`Element with ref "${ref}" not found`);
         }
 
-        // Use FastElementFinder to locate element using parallel strategies
         const strategies: SelectorStrategy[] = [];
 
         if (element.selector) strategies.push({ type: 'css', value: element.selector, priority: 1 });
@@ -324,18 +317,14 @@ export class BrowserClient {
         const locator = await this.fastFinder.findElement(this.page, strategies);
 
         if (!locator) {
-            console.warn(`Element ref "${ref}" not found with any strategy, falling back to legacy lookup`);
-            // Fallback to legacy logic strictly if fast finder fails (unlikely if element exists)
-            throw new Error(`Element with ref "${ref}" not found`);
+            throw new Error(`Element with ref "${ref}" not found with any strategy`);
         }
 
-        // Listen for new page/popup before clicking
         const [newPage] = await Promise.all([
             this.context.waitForEvent('page', { timeout: 2000 }).catch(() => null),
             locator.click({ timeout: 5000 }),
         ]);
 
-        // If a new page was opened, switch to it
         if (newPage) {
             console.log('   📄 New tab detected, switching to it...');
             await newPage.waitForLoadState('domcontentloaded').catch(() => { });
@@ -345,14 +334,12 @@ export class BrowserClient {
 
     /**
      * Type text into an element by ref
-     * Uses multiple strategies to find and fill the field
      */
     async type(ref: string, text: string, elementData?: SnapshotElement): Promise<void> {
         if (!this.page) throw new Error('Browser not launched');
 
         let element = elementData;
 
-        // If no element data provided, look it up (legacy mode)
         if (!element) {
             const snapshot = await this.takeSnapshot();
             element = snapshot.elements.find(e => e.ref === ref);
@@ -362,14 +349,14 @@ export class BrowserClient {
             throw new Error(`Element with ref "${ref}" not found`);
         }
 
-        // Use FastElementFinder
         const strategies: SelectorStrategy[] = [];
 
         if (element.selector) strategies.push({ type: 'css', value: element.selector, priority: 1 });
         strategies.push({ type: 'role', role: element.role, name: element.name, priority: 2 });
-        if (element.attributes.placeholder) strategies.push({ type: 'css', value: `[placeholder="${element.attributes.placeholder}"]`, priority: 3 });
+        if (element.attributes.placeholder) {
+            strategies.push({ type: 'css', value: `[placeholder="${element.attributes.placeholder}"]`, priority: 3 });
+        }
 
-        // Strategy 4: Try by type attribute for common inputs
         const inputType = element.attributes.type || 'text';
         if (inputType === 'email' || inputType === 'password' || inputType === 'text') {
             strategies.push({ type: 'css', value: `input[type="${inputType}"]`, priority: 4 });
@@ -394,15 +381,13 @@ export class BrowserClient {
     }
 
     /**
-     * Fill login form directly without needing element refs
-     * Tries multiple common selectors for email/username and password fields
+     * Fill login form directly
      */
     async fillLoginForm(email?: string, username?: string, password?: string): Promise<boolean> {
         if (!this.page) throw new Error('Browser not launched');
 
         let filledAny = false;
 
-        // Try to fill email/username field
         const userValue = email || username;
         if (userValue) {
             const emailSelectors = [
@@ -433,7 +418,6 @@ export class BrowserClient {
             }
         }
 
-        // Try to fill password field
         if (password) {
             const passwordSelectors = [
                 'input[type="password"]',
@@ -503,7 +487,6 @@ export class BrowserClient {
 
         let element = elementData;
 
-        // If no element data provided, look it up
         if (!element) {
             const snapshot = await this.takeSnapshot();
             element = snapshot.elements.find(e => e.ref === ref);
@@ -622,7 +605,6 @@ export class BrowserClient {
         const pages = this.context.pages();
         if (pages.length > 1) {
             await this.page.close();
-            // Switch to the first (main) page
             this.page = pages[0];
             console.log('   ✕ Closed tab, switched to main page');
         }
