@@ -1,0 +1,643 @@
+/**
+ * Browser Client - Controls Chromium browser via Playwright
+ */
+
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { join } from 'path';
+import type { BrowserConfig, PageSnapshot, SnapshotElement } from '../core/types.js';
+
+export class BrowserClient {
+    private browser: Browser | null = null;
+    private context: BrowserContext | null = null;
+    private page: Page | null = null;
+    private config: BrowserConfig;
+    private downloadsDir: string;
+
+    constructor(config: BrowserConfig, downloadsDir: string) {
+        this.config = config;
+        this.downloadsDir = downloadsDir;
+    }
+
+    /**
+     * Launch browser and create new page
+     */
+    async launch(): Promise<void> {
+        this.browser = await chromium.launch({
+            headless: this.config.headless,
+        });
+
+        this.context = await this.browser.newContext({
+            viewport: this.config.viewport || { width: 1280, height: 720 },
+            userAgent: this.config.userAgent,
+            acceptDownloads: true,
+        });
+
+        this.page = await this.context.newPage();
+        this.page.setDefaultTimeout(this.config.timeout);
+    }
+
+    /**
+     * Navigate to URL
+     */
+    async goto(url: string): Promise<void> {
+        if (!this.page) throw new Error('Browser not launched');
+        await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+        await this.page.waitForLoadState('networkidle').catch(() => { });
+    }
+
+    /**
+     * Get current URL
+     */
+    getUrl(): string {
+        if (!this.page) throw new Error('Browser not launched');
+        return this.page.url();
+    }
+
+    /**
+     * Get page title
+     */
+    async getTitle(): Promise<string> {
+        if (!this.page) throw new Error('Browser not launched');
+        return this.page.title();
+    }
+
+    /**
+     * Take a snapshot of the page for AI analysis
+     */
+    async takeSnapshot(): Promise<PageSnapshot> {
+        if (!this.page) throw new Error('Browser not launched');
+
+        const url = this.page.url();
+        const title = await this.page.title();
+        const timestamp = new Date().toISOString();
+
+        // Build elements list by querying interactive elements
+        const elements: SnapshotElement[] = [];
+        let refCounter = 1;
+
+        // Find all interactive elements
+        const interactiveSelectors = [
+            'button',
+            'a[href]',
+            'input',
+            'textarea',
+            'select',
+            '[role="button"]',
+            '[role="link"]',
+            '[role="textbox"]',
+            '[role="checkbox"]',
+            '[role="radio"]',
+            '[role="combobox"]',
+            '[role="menuitem"]',
+            '[role="tab"]',
+            '[onclick]',
+        ];
+
+        for (const selector of interactiveSelectors) {
+            try {
+                const locators = await this.page.locator(selector).all();
+                for (const locator of locators.slice(0, 50)) { // Limit per type
+                    try {
+                        const isVisible = await locator.isVisible().catch(() => false);
+                        if (!isVisible) continue;
+
+                        const tagName = await locator.evaluate(el => el.tagName.toLowerCase()).catch(() => 'unknown');
+                        const role = await locator.getAttribute('role') || this.getDefaultRole(tagName, selector);
+                        const name = await this.getElementName(locator);
+                        const type = await locator.getAttribute('type') || '';
+
+                        if (!name && !type) continue; // Skip unnamed elements
+
+                        elements.push({
+                            ref: `e${refCounter++}`,
+                            role,
+                            name: name || type || tagName,
+                            selector: selector,
+                            attributes: {
+                                type,
+                                placeholder: await locator.getAttribute('placeholder') || '',
+                            },
+                            isInteractive: true,
+                        });
+                    } catch {
+                        // Skip elements that error
+                    }
+                }
+            } catch {
+                // Selector not found, continue
+            }
+        }
+
+        // Build text representation for AI
+        const textRepresentation = this.buildTextRepresentation(elements, url, title);
+
+        return {
+            url,
+            title,
+            timestamp,
+            elements,
+            textRepresentation,
+        };
+    }
+
+    /**
+     * Get default role based on tag name
+     */
+    private getDefaultRole(tagName: string, _selector: string): string {
+        const roleMap: Record<string, string> = {
+            'button': 'button',
+            'a': 'link',
+            'input': 'textbox',
+            'textarea': 'textbox',
+            'select': 'combobox',
+        };
+        return roleMap[tagName] || 'generic';
+    }
+
+    /**
+     * Get element name from various attributes
+     */
+    private async getElementName(locator: any): Promise<string> {
+        try {
+            // Try aria-label first
+            const ariaLabel = await locator.getAttribute('aria-label');
+            if (ariaLabel) return ariaLabel;
+
+            // Try title
+            const titleAttr = await locator.getAttribute('title');
+            if (titleAttr) return titleAttr;
+
+            // Try inner text (for buttons, links)
+            const text = await locator.innerText().catch(() => '');
+            if (text && text.length < 100) return text.trim();
+
+            // Try placeholder (for inputs)
+            const placeholder = await locator.getAttribute('placeholder');
+            if (placeholder) return placeholder;
+
+            // Try name attribute
+            const nameAttr = await locator.getAttribute('name');
+            if (nameAttr) return nameAttr;
+
+            // Try id
+            const id = await locator.getAttribute('id');
+            if (id) return id;
+
+            return '';
+        } catch {
+            return '';
+        }
+    }
+
+
+    /**
+     * Build text representation of page for AI
+     */
+    private buildTextRepresentation(elements: SnapshotElement[], url: string, title: string): string {
+        const lines: string[] = [
+            `URL: ${url}`,
+            `Title: ${title}`,
+            '',
+            'Interactive Elements:',
+        ];
+
+        for (const el of elements) {
+            if (el.isInteractive) {
+                let line = `[${el.ref}] ${el.role}`;
+                if (el.name) line += `: "${el.name}"`;
+                if (el.attributes.value) line += ` (value: "${el.attributes.value}")`;
+                lines.push(line);
+            }
+        }
+
+        // Also add non-interactive but named elements for context
+        const namedNonInteractive = elements.filter(e => !e.isInteractive && e.name);
+        if (namedNonInteractive.length > 0) {
+            lines.push('', 'Other Elements:');
+            for (const el of namedNonInteractive.slice(0, 20)) { // Limit to avoid token overload
+                lines.push(`[${el.ref}] ${el.role}: "${el.name}"`);
+            }
+        }
+
+        return lines.join('\n');
+    }
+
+    /**
+     * Dismiss common overlays/modals (cookie banners, etc.)
+     */
+    async dismissOverlays(): Promise<void> {
+        if (!this.page) return;
+
+        const commonSelectors = [
+            '#onetrust-accept-btn-handler',
+            '#onetrust-reject-all-handler',
+            '.cc-btn',
+            '[aria-label="Accept cookies"]',
+            'button:has-text("Accept all")',
+            'button:has-text("Agree")',
+            'button:has-text("I agree")',
+            'button:has-text("Aceptar")',
+            '[aria-label="Close"]',
+            'button.close',
+            '.modal-close',
+            '.popup-close',
+        ];
+
+        for (const selector of commonSelectors) {
+            try {
+                const locator = this.page.locator(selector);
+                if (await locator.count() > 0 && await locator.first().isVisible()) {
+                    await locator.first().click({ timeout: 1000 }).catch(() => { });
+                    console.log('   🚫 Dismissed overlay/popup');
+                }
+            } catch { /* ignore */ }
+        }
+    }
+
+    /**
+     * Click an element by ref
+     * Handles new tabs/popups automatically
+     */
+    async click(ref: string, elementData?: SnapshotElement): Promise<void> {
+        if (!this.page || !this.context) throw new Error('Browser not launched');
+
+        let element = elementData;
+
+        // If no element data provided, look it up (legacy mode)
+        if (!element) {
+            const snapshot = await this.takeSnapshot();
+            element = snapshot.elements.find(e => e.ref === ref);
+        }
+
+        if (!element) {
+            throw new Error(`Element with ref "${ref}" not found`);
+        }
+
+        // Try selector first if available (faster)
+        let locator;
+        if (element.selector) {
+            locator = this.page.locator(element.selector);
+        } else {
+            locator = this.page.getByRole(element.role as any, { name: element.name });
+        }
+
+        // Listen for new page/popup before clicking
+        const [newPage] = await Promise.all([
+            this.context.waitForEvent('page', { timeout: 2000 }).catch(() => null),
+            locator.first().click({ timeout: 5000 }),
+        ]);
+
+        // If a new page was opened, switch to it
+        if (newPage) {
+            console.log('   📄 New tab detected, switching to it...');
+            await newPage.waitForLoadState('domcontentloaded').catch(() => { });
+            this.page = newPage;
+        }
+    }
+
+    /**
+     * Type text into an element by ref
+     * Uses multiple strategies to find and fill the field
+     */
+    async type(ref: string, text: string, elementData?: SnapshotElement): Promise<void> {
+        if (!this.page) throw new Error('Browser not launched');
+
+        let element = elementData;
+
+        // If no element data provided, look it up (legacy mode)
+        if (!element) {
+            const snapshot = await this.takeSnapshot();
+            element = snapshot.elements.find(e => e.ref === ref);
+        }
+
+        if (!element) {
+            throw new Error(`Element with ref "${ref}" not found`);
+        }
+
+        // Strategy 1: Try by CSS selector first (most reliable)
+        if (element.selector) {
+            try {
+                const locator = this.page.locator(element.selector);
+                if (await locator.count() > 0) {
+                    await locator.first().fill(text, { timeout: 5000 });
+                    return;
+                }
+            } catch { /* try next strategy */ }
+        }
+
+        // Strategy 2: Try by role + name
+        try {
+            const locator = this.page.getByRole(element.role as any, { name: element.name });
+            if (await locator.count() > 0) {
+                await locator.first().fill(text, { timeout: 5000 });
+                return;
+            }
+        } catch { /* try next strategy */ }
+
+        // Strategy 3: Try by placeholder
+        if (element.attributes.placeholder) {
+            try {
+                const locator = this.page.getByPlaceholder(element.attributes.placeholder);
+                if (await locator.count() > 0) {
+                    await locator.first().fill(text, { timeout: 5000 });
+                    return;
+                }
+            } catch { /* try next strategy */ }
+        }
+
+        // Strategy 4: Try by type attribute for common inputs
+        const inputType = element.attributes.type || 'text';
+        try {
+            if (inputType === 'email' || inputType === 'password' || inputType === 'text') {
+                const locator = this.page.locator(`input[type="${inputType}"]`);
+                if (await locator.count() > 0) {
+                    await locator.first().fill(text, { timeout: 5000 });
+                    return;
+                }
+            }
+        } catch { /* give up */ }
+
+        throw new Error(`Could not fill element "${ref}" with any strategy`);
+    }
+
+    /**
+     * Press a key
+     */
+    async press(key: string): Promise<void> {
+        if (!this.page) throw new Error('Browser not launched');
+        await this.page.keyboard.press(key);
+    }
+
+    /**
+     * Fill login form directly without needing element refs
+     * Tries multiple common selectors for email/username and password fields
+     */
+    async fillLoginForm(email?: string, username?: string, password?: string): Promise<boolean> {
+        if (!this.page) throw new Error('Browser not launched');
+
+        let filledAny = false;
+
+        // Try to fill email/username field
+        const userValue = email || username;
+        if (userValue) {
+            const emailSelectors = [
+                'input[type="email"]',
+                'input[name="email"]',
+                'input[name="username"]',
+                'input[name="user"]',
+                'input[name="login"]',
+                'input[id*="email"]',
+                'input[id*="user"]',
+                'input[id*="login"]',
+                'input[placeholder*="email" i]',
+                'input[placeholder*="correo" i]',
+                'input[placeholder*="usuario" i]',
+                'input[type="text"]:first-of-type',
+            ];
+
+            for (const selector of emailSelectors) {
+                try {
+                    const locator = this.page.locator(selector);
+                    if (await locator.count() > 0 && await locator.first().isVisible()) {
+                        await locator.first().fill(userValue, { timeout: 3000 });
+                        console.log(`   ✉️ Filled email/username with: ${userValue}`);
+                        filledAny = true;
+                        break;
+                    }
+                } catch { /* try next */ }
+            }
+        }
+
+        // Try to fill password field
+        if (password) {
+            const passwordSelectors = [
+                'input[type="password"]',
+                'input[name="password"]',
+                'input[name="pass"]',
+                'input[name="pwd"]',
+                'input[id*="password"]',
+                'input[id*="pass"]',
+                'input[placeholder*="password" i]',
+                'input[placeholder*="contraseña" i]',
+            ];
+
+            for (const selector of passwordSelectors) {
+                try {
+                    const locator = this.page.locator(selector);
+                    if (await locator.count() > 0 && await locator.first().isVisible()) {
+                        await locator.first().fill(password, { timeout: 3000 });
+                        console.log(`   🔒 Filled password field`);
+                        filledAny = true;
+                        break;
+                    }
+                } catch { /* try next */ }
+            }
+        }
+
+        return filledAny;
+    }
+
+    /**
+     * Click the login/submit button
+     */
+    async clickLoginButton(): Promise<boolean> {
+        if (!this.page) throw new Error('Browser not launched');
+
+        const buttonSelectors = [
+            'button[type="submit"]',
+            'input[type="submit"]',
+            'button:has-text("Login")',
+            'button:has-text("Sign in")',
+            'button:has-text("Iniciar")',
+            'button:has-text("Acceder")',
+            'button:has-text("Entrar")',
+            'button:has-text("Ingresar")',
+            '[role="button"]:has-text("Login")',
+            '[role="button"]:has-text("Acceder")',
+        ];
+
+        for (const selector of buttonSelectors) {
+            try {
+                const locator = this.page.locator(selector);
+                if (await locator.count() > 0 && await locator.first().isVisible()) {
+                    await locator.first().click({ timeout: 5000 });
+                    console.log(`   🔘 Clicked login button`);
+                    return true;
+                }
+            } catch { /* try next */ }
+        }
+
+        return false;
+    }
+
+    /**
+     * Select an option from a dropdown
+     */
+    async select(ref: string, value: string, elementData?: SnapshotElement): Promise<void> {
+        if (!this.page) throw new Error('Browser not launched');
+
+        let element = elementData;
+
+        // If no element data provided, look it up
+        if (!element) {
+            const snapshot = await this.takeSnapshot();
+            element = snapshot.elements.find(e => e.ref === ref);
+        }
+
+        if (!element) {
+            throw new Error(`Element with ref "${ref}" not found`);
+        }
+
+        let locator;
+        if (element.selector) {
+            locator = this.page.locator(element.selector);
+        } else {
+            locator = this.page.getByRole(element.role as any, { name: element.name });
+        }
+
+        await locator.first().selectOption(value, { timeout: 5000 });
+    }
+
+    /**
+     * Wait for something
+     */
+    async wait(options: { text?: string; selector?: string; timeout?: number }): Promise<void> {
+        if (!this.page) throw new Error('Browser not launched');
+        const timeout = options.timeout || 10000;
+
+        if (options.text) {
+            await this.page.getByText(options.text).waitFor({ timeout });
+        } else if (options.selector) {
+            await this.page.waitForSelector(options.selector, { timeout });
+        } else {
+            await this.page.waitForLoadState('networkidle', { timeout });
+        }
+    }
+
+    /**
+     * Scroll the page
+     */
+    async scroll(direction: 'up' | 'down'): Promise<void> {
+        if (!this.page) throw new Error('Browser not launched');
+        const amount = direction === 'down' ? 500 : -500;
+        await this.page.mouse.wheel(0, amount);
+        await this.page.waitForTimeout(500);
+    }
+
+    /**
+     * Take a screenshot
+     */
+    async screenshot(path: string): Promise<string> {
+        if (!this.page) throw new Error('Browser not launched');
+        await this.page.screenshot({ path, fullPage: false });
+        return path;
+    }
+
+    /**
+     * Get page content as text
+     */
+    async getTextContent(): Promise<string> {
+        if (!this.page) throw new Error('Browser not launched');
+        return this.page.innerText('body');
+    }
+
+    /**
+     * Wait for download and return path
+     */
+    async waitForDownload(): Promise<string> {
+        if (!this.page) throw new Error('Browser not launched');
+
+        const download = await this.page.waitForEvent('download', { timeout: 30000 });
+        const filename = download.suggestedFilename();
+        const savePath = join(this.downloadsDir, filename);
+        await download.saveAs(savePath);
+        return savePath;
+    }
+
+    /**
+     * Navigate back in browser history
+     */
+    async goBack(): Promise<void> {
+        if (!this.page) throw new Error('Browser not launched');
+        await this.page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => { });
+        await this.page.waitForLoadState('networkidle').catch(() => { });
+        console.log('   ⬅️ Navigated back');
+    }
+
+    /**
+     * Navigate forward in browser history
+     */
+    async goForward(): Promise<void> {
+        if (!this.page) throw new Error('Browser not launched');
+        await this.page.goForward({ waitUntil: 'domcontentloaded' }).catch(() => { });
+        await this.page.waitForLoadState('networkidle').catch(() => { });
+        console.log('   ➡️ Navigated forward');
+    }
+
+    /**
+     * Check if an element is visible immediately (no wait)
+     */
+    async isElementVisible(selector: string): Promise<boolean> {
+        if (!this.page) return false;
+        try {
+            const locator = this.page.locator(selector).first();
+            return await locator.isVisible();
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Close current tab and switch to main tab
+     */
+    async closeCurrentTab(): Promise<void> {
+        if (!this.page || !this.context) throw new Error('Browser not launched');
+
+        const pages = this.context.pages();
+        if (pages.length > 1) {
+            await this.page.close();
+            // Switch to the first (main) page
+            this.page = pages[0];
+            console.log('   ✕ Closed tab, switched to main page');
+        }
+    }
+
+    /**
+     * Switch to a specific tab by index
+     */
+    async switchToTab(index: number): Promise<void> {
+        if (!this.context) throw new Error('Browser not launched');
+
+        const pages = this.context.pages();
+        if (index >= 0 && index < pages.length) {
+            this.page = pages[index];
+            console.log(`   📑 Switched to tab ${index}`);
+        }
+    }
+
+    /**
+     * Get number of open tabs
+     */
+    getTabCount(): number {
+        return this.context?.pages().length || 0;
+    }
+
+    /**
+     * Close browser
+     */
+    async close(): Promise<void> {
+        if (this.browser) {
+            await this.browser.close();
+            this.browser = null;
+            this.context = null;
+            this.page = null;
+        }
+    }
+
+    /**
+     * Check if browser is running
+     */
+    isRunning(): boolean {
+        return this.browser !== null;
+    }
+}

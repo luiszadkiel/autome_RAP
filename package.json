@@ -1,0 +1,53 @@
+{
+    "name": "web-automation-standalone",
+    "version": "2.0.0",
+    "description": "Sistema de automatización web con IA - Clean Architecture + DDD",
+    "type": "module",
+    "main": "dist/main.js",
+    "scripts": {
+        "start": "tsx src/main.ts",
+        "agent": "tsx src/main.ts agent",
+        "execute": "tsx src/main.ts execute",
+        "replay": "tsx src/main.ts replay",
+        "server": "tsx src/main.ts server",
+        "list": "tsx src/main.ts list",
+        "build": "tsc",
+        "dev": "tsx watch src/main.ts",
+        "test": "tsx examples/test-agent.ts"
+    },
+    "keywords": [
+        "automation",
+        "web",
+        "ai",
+        "openai",
+        "playwright",
+        "clean-architecture",
+        "ddd"
+    ],
+    "author": "",
+    "license": "MIT",
+    "dependencies": {
+        "@hono/node-server": "^1.0.0",
+        "@hono/swagger-ui": "^0.5.3",
+        "@mozilla/readability": "^0.6.0",
+        "better-sqlite3": "^11.0.0",
+        "chalk": "^5.4.1",
+        "commander": "^12.1.0",
+        "dotenv": "^16.4.5",
+        "hono": "^4.0.0",
+        "linkedom": "^0.18.12",
+        "openai": "^4.73.0",
+        "playwright": "^1.50.0",
+        "undici": "^7.19.0",
+        "zod": "^3.0.0"
+    },
+    "devDependencies": {
+        "@types/better-sqlite3": "^7.0.0",
+        "@types/node": "^22.0.0",
+        "tsx": "^4.21.0",
+        "typescript": "^5.9.3"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    }
+}
