@@ -4,7 +4,9 @@
 
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { join } from 'path';
-import type { BrowserConfig, PageSnapshot, SnapshotElement } from '../core/types.js';
+import type { BrowserConfig, PageSnapshot, SnapshotElement, VisionSnapshot } from '../core/types.js';
+import { FastElementFinder, type SelectorStrategy } from './fast-element-finder.js';
+import { EnhancedSnapshot } from './enhanced-snapshot.js';
 
 export class BrowserClient {
     private browser: Browser | null = null;
@@ -12,6 +14,8 @@ export class BrowserClient {
     private page: Page | null = null;
     private config: BrowserConfig;
     private downloadsDir: string;
+    private fastFinder = new FastElementFinder();
+    private enhancedSnapshot = new EnhancedSnapshot();
 
     constructor(config: BrowserConfig, downloadsDir: string) {
         this.config = config;
@@ -138,6 +142,15 @@ export class BrowserClient {
             elements,
             textRepresentation,
         };
+    }
+
+    /**
+     * Take a vision-optimized snapshot
+     */
+    async takeVisionSnapshot(): Promise<VisionSnapshot> {
+        if (!this.page) throw new Error('Browser not launched');
+        const snapshot = await this.takeSnapshot();
+        return this.enhancedSnapshot.takeVisionSnapshot(this.page, snapshot.elements);
     }
 
     /**
@@ -273,18 +286,26 @@ export class BrowserClient {
             throw new Error(`Element with ref "${ref}" not found`);
         }
 
-        // Try selector first if available (faster)
-        let locator;
-        if (element.selector) {
-            locator = this.page.locator(element.selector);
-        } else {
-            locator = this.page.getByRole(element.role as any, { name: element.name });
+        // Use FastElementFinder to locate element using parallel strategies
+        const strategies: SelectorStrategy[] = [];
+
+        if (element.selector) strategies.push({ type: 'css', value: element.selector, priority: 1 });
+        if (element.xpath) strategies.push({ type: 'xpath', value: element.xpath, priority: 2 });
+        strategies.push({ type: 'role', role: element.role, name: element.name, priority: 3 });
+        if (element.name) strategies.push({ type: 'text', value: element.name, priority: 4 });
+
+        const locator = await this.fastFinder.findElement(this.page, strategies);
+
+        if (!locator) {
+            console.warn(`Element ref "${ref}" not found with any strategy, falling back to legacy lookup`);
+            // Fallback to legacy logic strictly if fast finder fails (unlikely if element exists)
+            throw new Error(`Element with ref "${ref}" not found`);
         }
 
         // Listen for new page/popup before clicking
         const [newPage] = await Promise.all([
             this.context.waitForEvent('page', { timeout: 2000 }).catch(() => null),
-            locator.first().click({ timeout: 5000 }),
+            locator.click({ timeout: 5000 }),
         ]);
 
         // If a new page was opened, switch to it
@@ -314,48 +335,25 @@ export class BrowserClient {
             throw new Error(`Element with ref "${ref}" not found`);
         }
 
-        // Strategy 1: Try by CSS selector first (most reliable)
-        if (element.selector) {
-            try {
-                const locator = this.page.locator(element.selector);
-                if (await locator.count() > 0) {
-                    await locator.first().fill(text, { timeout: 5000 });
-                    return;
-                }
-            } catch { /* try next strategy */ }
-        }
+        // Use FastElementFinder
+        const strategies: SelectorStrategy[] = [];
 
-        // Strategy 2: Try by role + name
-        try {
-            const locator = this.page.getByRole(element.role as any, { name: element.name });
-            if (await locator.count() > 0) {
-                await locator.first().fill(text, { timeout: 5000 });
-                return;
-            }
-        } catch { /* try next strategy */ }
-
-        // Strategy 3: Try by placeholder
-        if (element.attributes.placeholder) {
-            try {
-                const locator = this.page.getByPlaceholder(element.attributes.placeholder);
-                if (await locator.count() > 0) {
-                    await locator.first().fill(text, { timeout: 5000 });
-                    return;
-                }
-            } catch { /* try next strategy */ }
-        }
+        if (element.selector) strategies.push({ type: 'css', value: element.selector, priority: 1 });
+        strategies.push({ type: 'role', role: element.role, name: element.name, priority: 2 });
+        if (element.attributes.placeholder) strategies.push({ type: 'css', value: `[placeholder="${element.attributes.placeholder}"]`, priority: 3 });
 
         // Strategy 4: Try by type attribute for common inputs
         const inputType = element.attributes.type || 'text';
-        try {
-            if (inputType === 'email' || inputType === 'password' || inputType === 'text') {
-                const locator = this.page.locator(`input[type="${inputType}"]`);
-                if (await locator.count() > 0) {
-                    await locator.first().fill(text, { timeout: 5000 });
-                    return;
-                }
-            }
-        } catch { /* give up */ }
+        if (inputType === 'email' || inputType === 'password' || inputType === 'text') {
+            strategies.push({ type: 'css', value: `input[type="${inputType}"]`, priority: 4 });
+        }
+
+        const locator = await this.fastFinder.findElement(this.page, strategies);
+
+        if (locator) {
+            await locator.fill(text, { timeout: 5000 });
+            return;
+        }
 
         throw new Error(`Could not fill element "${ref}" with any strategy`);
     }
@@ -488,14 +486,15 @@ export class BrowserClient {
             throw new Error(`Element with ref "${ref}" not found`);
         }
 
-        let locator;
-        if (element.selector) {
-            locator = this.page.locator(element.selector);
-        } else {
-            locator = this.page.getByRole(element.role as any, { name: element.name });
-        }
+        const strategies: SelectorStrategy[] = [];
+        if (element.selector) strategies.push({ type: 'css', value: element.selector, priority: 1 });
+        strategies.push({ type: 'role', role: element.role, name: element.name, priority: 2 });
 
-        await locator.first().selectOption(value, { timeout: 5000 });
+        const locator = await this.fastFinder.findElement(this.page, strategies);
+
+        if (!locator) throw new Error(`Select element "${ref}" not found`);
+
+        await locator.selectOption(value, { timeout: 5000 });
     }
 
     /**

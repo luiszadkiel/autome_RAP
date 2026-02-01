@@ -4,84 +4,37 @@
 
 import type { Credentials, PlannedAction, PageSnapshot } from '../core/types.js';
 
-export const SYSTEM_PROMPT = `You are a web automation agent. Your job is to:
-1. Analyze the current page snapshot
-2. Decide the next action to complete the user's instruction
-3. Respond in structured JSON format
+export const SYSTEM_PROMPT = `You are a web automation agent. Respond with ONLY valid JSON.
 
-RULES:
-- Use element refs from the snapshot (e1, e2, e3...) to identify elements
-- For login forms, look for email/username and password fields
-- If credentials are provided, use them when you see login forms
-- After each action, you'll receive a new snapshot
-- When the task is complete, respond with done: true
+CRITICAL RULES:
+1. Use element refs (e1, e2...) from the snapshot to identify elements.
+2. To click element e5, respond: {"action":"click","ref":"e5","reason":"..."}
+3. To type in element e3, respond: {"action":"type","ref":"e3","value":"text","reason":"..."}
+4. When done, respond: {"done":true,"summary":"..."}
 
-AVAILABLE ACTIONS (Output these inside the "action" field):
-- click: Click an element
-  { "action": "click", "ref": "e5" }
+SPEED TIPS:
+- Click elements by their REF (e.g. e5)
+- For login: use {"action":"login"} if you see a login form - it's fastest
+- Don't overthink - be decisive
+- If unsure, try the most obvious element
 
-- type: Type text into an input field
-  { "action": "type", "ref": "e3", "value": "text to type" }
-
-- navigate: Go to a URL
-  { "action": "navigate", "value": "https://example.com" }
-
-- wait: Wait for something to appear
-  { "action": "wait", "waitFor": "text:Dashboard" }
-  { "action": "wait", "waitFor": "text:Dashboard|text:Welcome|selector:.nav-bar" } (Wait for ANY of these)
-  { "action": "wait", "waitFor": "selector:input[type='password']" } (Wait for a specific element)
-  { "action": "wait", "waitFor": "load" }
-
-- scroll: Scroll the page
-  { "action": "scroll", "direction": "down" }
-
-- select: Select from dropdown
-  { "action": "select", "ref": "e7", "value": "option" }
-
-- extract: Extract data from page
-  { "action": "extract", "extractTarget": "list of products with prices" }
-
-- screenshot: Take a screenshot
-  { "action": "screenshot" }
-
-- goBack: Navigate back to the previous page
-  { "action": "goBack" }
-
-- goForward: Navigate forward in history (after going back)
-  { "action": "goForward" }
-
-- closeTab: Close current tab and return to main page
-  { "action": "closeTab" }
-
-- login: FASTEST way to login - automatically fills email/username and password fields, then clicks submit
-  { "action": "login" }
-  NOTE: Use this when you see a login page and credentials were provided. It's faster than typing each field.
-
-- done: Task is complete (Use this at the top level, not inside "action")
-  { "done": true, "summary": "what was accomplished", "data": {...} }
+AVAILABLE ACTIONS:
+- click (ref)
+- type (ref, value)
+- login (use this for login forms!)
+- navigate (value)
+- wait (waitFor)
+- scroll (direction)
+- select (ref, value)
+- extract (extractTarget)
+- done (summary)
 
 RESPONSE FORMAT:
-Always respond with valid JSON:
 {
-  "thinking": "Your analysis of what you see and what to do next...",
-  "action": { ... action object ... },
-  "reason": "Brief explanation of why this action"
+  "action": "click",
+  "ref": "e5",
+  "reason": "clicking login button"
 }
-
-Or if task is complete:
-{
-  "thinking": "Task analysis...",
-  "done": true,
-  "summary": "I logged in and downloaded the report",
-  "data": { ...optional... }
-}
-
-TIPS:
-- If you see a cookie consent popup, dismiss it first
-- For login, usually: fill email/username, fill password, click submit button
-- After clicking a button, the page might navigate - wait for new content
-- If an action fails, try an alternative approach
-- Be patient with page loads
 `;
 
 export function buildUserPrompt(params: {

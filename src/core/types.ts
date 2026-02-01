@@ -23,6 +23,10 @@ export interface AgentOptions {
     timeout?: number;
     /** Data directory for storing files */
     dataDir?: string;
+    /** Enable Vision API (GPT-4 Vision) */
+    enableVision?: boolean;
+    /** Enable fallback to text-only mode if Vision fails (default: true) */
+    visionFallbackEnabled?: boolean;
 }
 
 export interface AgentInput {
@@ -162,6 +166,15 @@ export interface PageSnapshot {
     textRepresentation: string;
 }
 
+export interface VisionSnapshot {
+    screenshot: string; // base64
+    elements: SnapshotElement[];
+    url: string;
+    viewport: { width: number; height: number } | null;
+    size?: number;
+    quality?: number;
+}
+
 // ============================================
 // Flow Recording Types
 // ============================================
@@ -254,5 +267,10 @@ export interface Config {
         maxSteps: number;
         screenshotOnEachStep: boolean;
         autoRecordFlows: boolean;
+    };
+    vision?: {
+        enabled: boolean;
+        fallbackEnabled: boolean;
+        costTracking: boolean;
     };
 }

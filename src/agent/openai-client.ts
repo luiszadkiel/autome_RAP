@@ -24,6 +24,9 @@ export class OpenAIClient {
     /**
      * Plan the next action based on current page state and instruction
      */
+    /**
+     * Plan the next action based on current page state and instruction
+     */
     async planNextAction(params: {
         instruction: string;
         currentUrl: string;
@@ -34,15 +37,80 @@ export class OpenAIClient {
     }): Promise<OpenAIResponse> {
         const userPrompt = buildUserPrompt(params);
 
+        return this.executeCompletion(
+            [
+                { role: 'system', content: SYSTEM_PROMPT },
+                { role: 'user', content: userPrompt },
+            ]
+        );
+    }
+
+    /**
+     * Plan the next action using GPT-4 Vision
+     */
+    async planNextActionWithVision(params: {
+        instruction: string;
+        currentUrl: string;
+        visionSnapshot: unknown; // Ideally VisionSnapshot but preventing circular dep if type not imported
+        previousActions: PlannedAction[];
+        credentials?: Credentials;
+        formData?: Record<string, string>;
+    }): Promise<OpenAIResponse> {
+        // We cast to any to access the specific vision properties
+        const snapshot = params.visionSnapshot as any;
+
+        // Use optimized prompt for vision
+        const visionSystemPrompt = `You are a web automation agent. Analyze the screenshot and user instruction.
+Responde ONLY with valid JSON.
+
+CRITICAL RULES:
+1. Look at the screenshot - NO fake elements.
+2. The red numbered badges overlay typical elements. Use their numbers for "ref".
+3. To click element 5, respond: {"action":"click","ref":"5","reason":"..."}
+4. For login: if you see login form + credentials provided -> {"action":"login"}
+5. Be concise.
+
+AVAILABLE ACTIONS:
+- click (ref), type (ref, value), navigate (value), wait (waitFor), scroll (direction), select (ref, value), login, done
+`;
+
+        const userContent: any[] = [
+            {
+                type: "text",
+                text: `Instruction: ${params.instruction}
+Current URL: ${params.currentUrl}
+Previous Actions: ${JSON.stringify(params.previousActions.map(a => `${a.action}(${a.ref || ''})`))}
+
+Determine the next step. Respond with JSON.`
+            },
+            {
+                type: "image_url",
+                image_url: {
+                    url: `data:image/jpeg;base64,${snapshot.screenshot}`,
+                    detail: "high"
+                }
+            }
+        ];
+
+        return this.executeCompletion(
+            [
+                { role: 'system', content: visionSystemPrompt },
+                { role: 'user', content: userContent },
+            ]
+        );
+    }
+
+    /**
+     * Execute OpenAI completion
+     */
+    private async executeCompletion(messages: any[]): Promise<OpenAIResponse> {
         try {
             const response = await this.client.chat.completions.create({
                 model: this.model,
-                messages: [
-                    { role: 'system', content: SYSTEM_PROMPT },
-                    { role: 'user', content: userPrompt },
-                ],
-                temperature: 0.1, // Low temperature for consistent behavior
+                messages: messages,
+                temperature: 0.1,
                 response_format: { type: 'json_object' },
+                max_tokens: 1000,
             });
 
             const content = response.choices[0]?.message?.content;
@@ -61,16 +129,30 @@ export class OpenAIClient {
                 } as DoneResponse;
             }
 
-            // Extract action object
-            // Handle { action: { ... } } vs { action: "click", ... }
             let actionData = parsed;
             if (parsed.action && typeof parsed.action === 'object' && !Array.isArray(parsed.action)) {
                 actionData = parsed.action;
             }
 
+            // Normalize 'ref' for vision (might come as "5" or "e5", we need "e5" for internal consistency if mapped,
+            // but for Vision mapped to fast-finder, we might need strictly what the badge say.
+            // Our EnhancedSnapshot adds badges "1", "2".
+            // Legacy/FastFinder expects "e" prefix in some places?
+            // Actually FastFinder strategies: element.selector etc.
+            // Wait, BrowserClient.click() takes a ref.
+            // If ref is "5", BrowserClient needs a way to map "5" to the element.
+            // The `snapshot.elements` has `ref: e5`. The badge says `5`.
+            // So if LLM says `ref: "5"`, we should probably map it to `e5` or ensure consistency.
+            // Let's just fix it here:
+
+            let ref = actionData.ref;
+            if (ref && /^\d+$/.test(ref)) {
+                ref = `e${ref}`;
+            }
+
             return {
                 action: actionData.action,
-                ref: actionData.ref,
+                ref: ref,
                 value: actionData.value,
                 waitFor: actionData.waitFor,
                 direction: actionData.direction,

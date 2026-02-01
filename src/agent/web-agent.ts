@@ -16,6 +16,8 @@ import { BrowserClient } from '../browser/browser-client.js';
 import { OpenAIClient } from './openai-client.js';
 import { ActionExecutor } from './action-executor.js';
 import { FlowRecorder } from '../recorder/flow-recorder.js';
+import { VisionCache } from './vision-cache.js';
+import { PerformanceMetrics } from '../core/metrics.js';
 
 export class WebAgent {
     private config: Config;
@@ -23,6 +25,8 @@ export class WebAgent {
     private browser: BrowserClient | null = null;
     private recorder: FlowRecorder | null = null;
     private options: AgentOptions;
+    private visionCache = new VisionCache();
+    private metrics = new PerformanceMetrics();
 
     constructor(options: AgentOptions) {
         this.options = options;
@@ -105,26 +109,90 @@ export class WebAgent {
                 stepCount++;
                 console.log(`\n📍 Step ${stepCount}/${maxSteps}`);
 
-                // Take snapshot
-                const snapshot = await this.browser.takeSnapshot();
-                console.log(`   URL: ${snapshot.url}`);
-                console.log(`   Elements: ${snapshot.elements.length}`);
+                // Decision Phase
+                let response: any;
+                const startTimeDecision = Date.now();
 
-                // Record snapshot
-                if (this.recorder) {
-                    this.recorder.recordSnapshot(snapshot);
+                // Determine mode: Vision or Text
+                const useVision = this.options.enableVision ?? false;
+
+                if (useVision) {
+                    try {
+                        console.log(`   👁️ capturing vision snapshot...`);
+                        const visionSnap = await this.browser.takeVisionSnapshot();
+
+                        // Check cache first
+                        const cachedAction = await this.visionCache.get(visionSnap, input.instruction);
+
+                        if (cachedAction) {
+                            response = cachedAction;
+                        } else {
+                            console.log(`   🧠 Analyzing with Vision AI...`);
+                            response = await this.openai.planNextActionWithVision({
+                                instruction: input.instruction,
+                                currentUrl: this.browser.getUrl(),
+                                visionSnapshot: visionSnap,
+                                previousActions,
+                                credentials: input.credentials,
+                                formData: input.formData,
+                            });
+
+                            // Cache successful non-done actions
+                            if (!('done' in response)) {
+                                this.visionCache.set(visionSnap, input.instruction, response as any);
+                            }
+                        }
+
+                        this.metrics.recordStep({
+                            type: 'vision',
+                            duration: Date.now() - startTimeDecision,
+                            timestamp: Date.now(),
+                            imageSize: visionSnap.size
+                        });
+
+                    } catch (visionError) {
+                        console.warn(`   ⚠️ Vision failed: ${visionError}. Falling back to text mode.`);
+                        if (this.options.visionFallbackEnabled === false) throw visionError;
+
+                        // FALLBACK TO TEXT MODE
+                        const snapshot = await this.browser.takeSnapshot();
+                        console.log(`   🤖 Thinking (Text Mode)...`);
+                        response = await this.openai.planNextAction({
+                            instruction: input.instruction,
+                            currentUrl: this.browser.getUrl(),
+                            snapshot,
+                            previousActions,
+                            credentials: input.credentials,
+                            formData: input.formData,
+                        });
+
+                        this.metrics.recordStep({
+                            type: 'text',
+                            duration: Date.now() - startTimeDecision,
+                            timestamp: Date.now()
+                        });
+                    }
+                } else {
+                    // TEXT ONLY MODE (Legacy)
+                    const snapshot = await this.browser.takeSnapshot();
+                    console.log(`   elements: ${snapshot.elements.length}`);
+                    console.log(`   🤖 Thinking...`);
+
+                    response = await this.openai.planNextAction({
+                        instruction: input.instruction,
+                        currentUrl: this.browser.getUrl(),
+                        snapshot,
+                        previousActions,
+                        credentials: input.credentials,
+                        formData: input.formData,
+                    });
+
+                    this.metrics.recordStep({
+                        type: 'text',
+                        duration: Date.now() - startTimeDecision,
+                        timestamp: Date.now()
+                    });
                 }
-
-                // Ask AI for next action
-                console.log(`   🤖 Thinking...`);
-                const response = await this.openai.planNextAction({
-                    instruction: input.instruction,
-                    currentUrl: this.browser.getUrl(),
-                    snapshot,
-                    previousActions,
-                    credentials: input.credentials,
-                    formData: input.formData,
-                });
 
                 // Check if done
                 if ('done' in response && response.done) {
@@ -157,7 +225,7 @@ export class WebAgent {
                 console.log(`   ▶️ Action: ${action.action}${action.ref ? ` [${action.ref}]` : ''}${action.value ? `: "${action.value}"` : ''}`);
                 console.log(`   💭 Reason: ${action.reason}`);
 
-                const result = await executor.execute(action, snapshot);
+                const result = await executor.execute(action, undefined); // Snapshot not strictly needed for executor anymore due to fast-finder
                 steps.push(result);
                 previousActions.push(action);
 
@@ -234,6 +302,8 @@ export class WebAgent {
             };
 
         } finally {
+            this.metrics.printReport();
+
             // Cleanup
             if (this.browser) {
                 await this.browser.close();
