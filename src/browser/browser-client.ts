@@ -71,65 +71,76 @@ export class BrowserClient {
     async takeSnapshot(): Promise<PageSnapshot> {
         if (!this.page) throw new Error('Browser not launched');
 
-        const url = this.page.url();
-        const title = await this.page.title();
+        let url: string;
+        try {
+            url = this.page.url();
+        } catch (error) {
+            throw new Error('Page has been closed or navigated away');
+        }
+
+        const title = await this.page.title().catch(() => 'Unknown Title');
         const timestamp = new Date().toISOString();
 
         // Build elements list by querying interactive elements
         const elements: SnapshotElement[] = [];
         let refCounter = 1;
 
-        // Find all interactive elements
-        const interactiveSelectors = [
-            'button',
-            'a[href]',
-            'input',
-            'textarea',
-            'select',
-            '[role="button"]',
-            '[role="link"]',
-            '[role="textbox"]',
-            '[role="checkbox"]',
-            '[role="radio"]',
-            '[role="combobox"]',
-            '[role="menuitem"]',
-            '[role="tab"]',
-            '[onclick]',
-        ];
+        try {
+            // Find all interactive elements
+            const interactiveSelectors = [
+                'button',
+                'a[href]',
+                'input',
+                'textarea',
+                'select',
+                '[role="button"]',
+                '[role="link"]',
+                '[role="textbox"]',
+                '[role="checkbox"]',
+                '[role="radio"]',
+                '[role="combobox"]',
+                '[role="menuitem"]',
+                '[role="tab"]',
+                '[onclick]',
+            ];
 
-        for (const selector of interactiveSelectors) {
-            try {
-                const locators = await this.page.locator(selector).all();
-                for (const locator of locators.slice(0, 50)) { // Limit per type
-                    try {
-                        const isVisible = await locator.isVisible().catch(() => false);
-                        if (!isVisible) continue;
+            for (const selector of interactiveSelectors) {
+                try {
+                    const locators = await this.page.locator(selector).all();
+                    for (const locator of locators.slice(0, 50)) { // Limit per type
+                        try {
+                            const isVisible = await locator.isVisible().catch(() => false);
+                            if (!isVisible) continue;
 
-                        const tagName = await locator.evaluate(el => el.tagName.toLowerCase()).catch(() => 'unknown');
-                        const role = await locator.getAttribute('role') || this.getDefaultRole(tagName, selector);
-                        const name = await this.getElementName(locator);
-                        const type = await locator.getAttribute('type') || '';
+                            const tagName = await locator.evaluate(el => el.tagName.toLowerCase()).catch(() => 'unknown');
+                            const role = await locator.getAttribute('role') || this.getDefaultRole(tagName, selector);
+                            const name = await this.getElementName(locator);
+                            const type = await locator.getAttribute('type') || '';
 
-                        if (!name && !type) continue; // Skip unnamed elements
+                            if (!name && !type) continue; // Skip unnamed elements
 
-                        elements.push({
-                            ref: `e${refCounter++}`,
-                            role,
-                            name: name || type || tagName,
-                            selector: selector,
-                            attributes: {
-                                type,
-                                placeholder: await locator.getAttribute('placeholder') || '',
-                            },
-                            isInteractive: true,
-                        });
-                    } catch {
-                        // Skip elements that error
+                            elements.push({
+                                ref: `e${refCounter++}`,
+                                role,
+                                name: name || type || tagName,
+                                selector: selector,
+                                attributes: {
+                                    type,
+                                    placeholder: await locator.getAttribute('placeholder') || '',
+                                },
+                                isInteractive: true,
+                            });
+                        } catch {
+                            // Skip elements that error
+                        }
                     }
+                } catch {
+                    // Selector not found, continue
                 }
-            } catch {
-                // Selector not found, continue
             }
+        } catch (e) {
+            console.warn('Error collecting elements:', e);
+            // Return what we have
         }
 
         // Build text representation for AI
@@ -142,6 +153,22 @@ export class BrowserClient {
             elements,
             textRepresentation,
         };
+    }
+
+    /**
+     * Check if the user appears to be logged in based on URL
+     */
+    async isLoggedIn(): Promise<boolean> {
+        if (!this.page) return false;
+        try {
+            const url = this.page.url();
+            return url.includes('dashboard') ||
+                url.includes('account') ||
+                url.includes('admin') ||
+                url.includes('profile');
+        } catch {
+            return false;
+        }
     }
 
     /**

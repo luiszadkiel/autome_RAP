@@ -10,7 +10,9 @@ CRITICAL RULES:
 1. Use element refs (e1, e2...) from the snapshot to identify elements.
 2. To click element e5, respond: {"action":"click","ref":"e5","reason":"..."}
 3. To type in element e3, respond: {"action":"type","ref":"e3","value":"text","reason":"..."}
-4. When done, respond: {"done":true,"summary":"..."}
+4. When task is COMPLETE, respond: {"done":true,"summary":"completed X successfully"}
+
+IMPORTANT: Format for completion is {"done":true,"summary":"..."}  NOT {"action":"done"}
 
 SPEED TIPS:
 - Click elements by their REF (e.g. e5)

@@ -95,7 +95,8 @@ export type ActionType =
     | 'goBack'
     | 'goForward'
     | 'closeTab'
-    | 'login';
+    | 'login'
+    | 'done';
 
 export interface PlannedAction {
     action: ActionType;

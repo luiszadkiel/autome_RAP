@@ -11,6 +11,7 @@ import type {
     PageSnapshot
 } from '../core/types.js';
 import { SYSTEM_PROMPT, buildUserPrompt } from './prompts.js';
+import { normalizeOpenAIResponse } from './response-normalizer.js';
 
 export class OpenAIClient {
     private client: OpenAI;
@@ -119,46 +120,17 @@ Determine the next step. Respond with JSON.`
             }
 
             const parsed = JSON.parse(content);
+            const normalized = normalizeOpenAIResponse(parsed);
 
-            // Check if done
-            if (parsed.done === true) {
-                return {
-                    done: true,
-                    summary: parsed.summary || 'Task completed',
-                    data: parsed.data,
-                } as DoneResponse;
+            // Ref normalization for vision/consistency (if it's a PlannedAction)
+            if ('action' in normalized) {
+                let ref = normalized.ref;
+                if (ref && /^\d+$/.test(ref)) {
+                    normalized.ref = `e${ref}`;
+                }
             }
 
-            let actionData = parsed;
-            if (parsed.action && typeof parsed.action === 'object' && !Array.isArray(parsed.action)) {
-                actionData = parsed.action;
-            }
-
-            // Normalize 'ref' for vision (might come as "5" or "e5", we need "e5" for internal consistency if mapped,
-            // but for Vision mapped to fast-finder, we might need strictly what the badge say.
-            // Our EnhancedSnapshot adds badges "1", "2".
-            // Legacy/FastFinder expects "e" prefix in some places?
-            // Actually FastFinder strategies: element.selector etc.
-            // Wait, BrowserClient.click() takes a ref.
-            // If ref is "5", BrowserClient needs a way to map "5" to the element.
-            // The `snapshot.elements` has `ref: e5`. The badge says `5`.
-            // So if LLM says `ref: "5"`, we should probably map it to `e5` or ensure consistency.
-            // Let's just fix it here:
-
-            let ref = actionData.ref;
-            if (ref && /^\d+$/.test(ref)) {
-                ref = `e${ref}`;
-            }
-
-            return {
-                action: actionData.action,
-                ref: ref,
-                value: actionData.value,
-                waitFor: actionData.waitFor,
-                direction: actionData.direction,
-                extractTarget: actionData.extractTarget,
-                reason: actionData.reason || parsed.reason || 'No reason provided',
-            } as PlannedAction;
+            return normalized;
 
         } catch (error) {
             if (error instanceof SyntaxError) {

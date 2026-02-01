@@ -171,8 +171,20 @@ export class ActionExecutor {
                     await this.browser.closeCurrentTab();
                     break;
 
+                case 'done':
+                    // This action indicates the task is complete.
+                    // The agent should handle the final state, but we mark it as successful here.
+                    break;
+
                 case 'login':
                     // Quick login: fill form and click submit
+                    // Check if already logged in by looking for common login form elements
+                    const isLoggedIn = await this.browser.isLoggedIn();
+                    if (isLoggedIn) {
+                        console.log('Already logged in, skipping login action.');
+                        break;
+                    }
+
                     const filled = await this.browser.fillLoginForm(
                         this.credentials?.email,
                         this.credentials?.username,
