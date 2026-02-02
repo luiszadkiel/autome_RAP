@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Generador de Links - Cayacoa Golf</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            padding: 32px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        h1 {
+            color: #059669;
+            text-align: center;
+            margin-bottom: 8px;
+            font-size: 28px;
+        }
+        .subtitle {
+            text-align: center;
+            color: #64748b;
+            margin-bottom: 32px;
+            font-size: 14px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            color: #334155;
+            font-weight: 600;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+        input, select {
+            width: 100%;
+            padding: 14px;
+            border: 2px solid #e2e8f0;
+            border-radius: 10px;
+            font-size: 15px;
+            transition: all 0.2s;
+        }
+        input:focus, select:focus {
+            outline: none;
+            border-color: #10b981;
+            box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1);
+        }
+        button {
+            width: 100%;
+            padding: 16px;
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+            box-shadow: 0 6px 20px rgba(16, 185, 129, 0.3);
+            transition: transform 0.2s;
+            margin-top: 12px;
+        }
+        button:hover { transform: translateY(-2px); }
+        button:active { transform: translateY(0); }
+        .result {
+            display: none;
+            background: #f0fdf4;
+            padding: 20px;
+            border-radius: 12px;
+            border-left: 4px solid #10b981;
+            margin-top: 24px;
+        }
+        .result.active { display: block; }
+        .result h3 {
+            color: #059669;
+            margin-bottom: 12px;
+            font-size: 16px;
+        }
+        .link-box {
+            background: white;
+            padding: 16px;
+            border-radius: 8px;
+            word-break: break-all;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            color: #059669;
+            margin-bottom: 12px;
+            border: 2px solid #10b981;
+        }
+        .copy-btn {
+            background: #059669;
+            font-size: 14px;
+            padding: 12px;
+        }
+        .whatsapp-box {
+            background: #dcf8c6;
+            padding: 16px;
+            border-radius: 12px;
+            margin-top: 16px;
+            font-size: 14px;
+            line-height: 1.6;
+            white-space: pre-line;
+            border-left: 4px solid #25D366;
+        }
+        .note {
+            background: #f0f9ff;
+            padding: 12px;
+            border-radius: 8px;
+            border-left: 4px solid #0ea5e9;
+            margin-top: 12px;
+            font-size: 13px;
+            color: #334155;
+        }
+        .logo {
+            text-align: center;
+            font-size: 56px;
+            margin-bottom: 16px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">🏌️</div>
+        <h1>Generador de Links</h1>
+        <p class="subtitle">Cayacoa Golf - Acceso Automático</p>
+        
+        <div class="form-group">
+            <label>🌐 URL de tu PWA</label>
+            <input type="url" id="pwaUrl" placeholder="https://tu-usuario.github.io/cayacoa-pwa/" value="https://tu-usuario.github.io/cayacoa-pwa/">
+        </div>
+        
+        <div class="form-group">
+            <label>📅 Fecha de Reserva</label>
+            <input type="date" id="fecha" required>
+        </div>
+        
+        <div class="form-group">
+            <label>⏰ Hora de Reserva</label>
+            <input type="time" id="hora" required>
+        </div>
+        
+        <button onclick="generarLink()">🚀 Generar Link</button>
+        
+        <div id="resultado" class="result">
+            <h3>✅ Link Generado</h3>
+            <div class="link-box" id="linkGenerado"></div>
+            <button class="copy-btn" onclick="copiarLink()">📋 Copiar Link</button>
+            
+            <div class="note">
+                <strong>💡 Formato del booking:</strong><br>
+                <code id="formatoBooking"></code>
+            </div>
+            
+            <div class="whatsapp-box" id="mensajeWhatsapp"></div>
+            <button class="copy-btn" onclick="copiarMensaje()">💬 Copiar Mensaje</button>
+        </div>
+    </div>
+
+    <script>
+        // Establecer fecha de hoy por defecto
+        document.getElementById('fecha').valueAsDate = new Date();
+        
+        function generarLink() {
+            const pwaUrl = document.getElementById('pwaUrl').value.trim();
+            const fecha = document.getElementById('fecha').value; // YYYY-MM-DD
+            const hora = document.getElementById('hora').value; // HH:MM
+            
+            if (!pwaUrl || !fecha || !hora) {
+                alert('Por favor completa todos los campos');
+                return;
+            }
+            
+            // Parsear fecha
+            const [year, month, day] = fecha.split('-');
+            
+            // Parsear hora
+            const [hours, minutes] = hora.split(':');
+            const hourInt = parseInt(hours);
+            
+            // Determinar AM/PM
+            const meridian = hourInt >= 12 ? 'pm' : 'am';
+            
+            // Convertir a formato 12 horas
+            const displayHour = hourInt > 12 ? hourInt - 12 : (hourInt === 0 ? 12 : hourInt);
+            
+            // Construir booking
+            const booking = `${displayHour}${minutes}${meridian}/${day}${month}${year}`;
+            
+            // Construir link
+            const baseUrl = pwaUrl.endsWith('/') ? pwaUrl : pwaUrl + '/';
+            const linkCompleto = `${baseUrl}?booking=${booking}`;
+            
+            // Formatear fecha para mensaje
+            const monthNames = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 
+                              'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+            const monthName = monthNames[parseInt(month) - 1];
+            const fechaFormateada = `${parseInt(day)} de ${monthName} ${year}`;
+            
+            // Formatear hora para mensaje
+            const horaFormateada = `${displayHour}:${minutes} ${meridian.toUpperCase()}`;
+            
+            // Mostrar resultado
+            document.getElementById('linkGenerado').textContent = linkCompleto;
+            document.getElementById('formatoBooking').textContent = booking;
+            
+            // Mensaje de WhatsApp
+            const mensaje = `¡Hola! 👋
+
+Tu reserva en Cayacoa Golf está confirmada:
+
+📅 ${fechaFormateada}
+⏰ ${horaFormateada}
+🏌️ Campo Principal
+
+Accede directamente aquí:
+${linkCompleto}
+
+✨ La primera vez te pedirá tus credenciales de Cayacoa.
+Las próximas veces entrarás automáticamente.
+
+¡Nos vemos en el campo! ⛳`;
+            
+            document.getElementById('mensajeWhatsapp').textContent = mensaje;
+            
+            // Mostrar resultado
+            document.getElementById('resultado').classList.add('active');
+            
+            // Scroll al resultado
+            document.getElementById('resultado').scrollIntoView({ behavior: 'smooth' });
+        }
+        
+        function copiarLink() {
+            const link = document.getElementById('linkGenerado').textContent;
+            navigator.clipboard.writeText(link).then(() => {
+                const btn = event.target;
+                const original = btn.textContent;
+                btn.textContent = '✅ Copiado!';
+                setTimeout(() => {
+                    btn.textContent = original;
+                }, 2000);
+            });
+        }
+        
+        function copiarMensaje() {
+            const mensaje = document.getElementById('mensajeWhatsapp').textContent;
+            navigator.clipboard.writeText(mensaje).then(() => {
+                const btn = event.target;
+                const original = btn.textContent;
+                btn.textContent = '✅ Copiado!';
+                setTimeout(() => {
+                    btn.textContent = original;
+                }, 2000);
+            });
+        }
+    </script>
+</body>
+</html>

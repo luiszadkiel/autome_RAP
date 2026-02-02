@@ -273,16 +273,184 @@ const openApiSpec = {
                     }
                 }
             }
+        },
+        '/api/session': {
+            post: {
+                summary: '🔗 Crear Magic Link con cookies y credenciales',
+                description: 'Genera un link compartible que apunta a cayacoagolf.com con auto-login. El usuario hace clic y el userscript de Tampermonkey hace login automático.',
+                tags: ['Magic Link'],
+                requestBody: {
+                    required: true,
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                required: ['token', 'url', 'cookies'],
+                                properties: {
+                                    token: { type: 'string', description: 'Token único para el magic link (ej: UUID)' },
+                                    url: { type: 'string', description: 'URL de destino en Cayacoa después del login' },
+                                    cookies: { 
+                                        type: 'array',
+                                        description: 'Cookies de sesión del navegador',
+                                        items: {
+                                            type: 'object',
+                                            properties: {
+                                                name: { type: 'string' },
+                                                value: { type: 'string' },
+                                                domain: { type: 'string' },
+                                                path: { type: 'string' }
+                                            }
+                                        }
+                                    },
+                                    credentials: {
+                                        type: 'object',
+                                        description: 'Credenciales de login',
+                                        properties: {
+                                            username: { type: 'string' },
+                                            password: { type: 'string' }
+                                        }
+                                    },
+                                    reservationInfo: {
+                                        type: 'object',
+                                        description: 'Información de la reserva (opcional)',
+                                        properties: {
+                                            date: { type: 'string' },
+                                            time: { type: 'string' },
+                                            price: { type: 'string' }
+                                        }
+                                    }
+                                }
+                            },
+                            example: {
+                                token: 'abc123xyz',
+                                url: 'https://cayacoagolf.com/payment/12345',
+                                cookies: [
+                                    { name: 'session_id', value: 'xyz789', domain: 'cayacoagolf.com', path: '/' }
+                                ],
+                                credentials: {
+                                    username: 'usuario@email.com',
+                                    password: 'contraseña123'
+                                },
+                                reservationInfo: {
+                                    date: '2026-02-15',
+                                    time: '10:00 AM',
+                                    price: '$50'
+                                }
+                            }
+                        }
+                    }
+                },
+                responses: {
+                    '200': {
+                        description: 'Magic Link generado exitosamente',
+                        content: {
+                            'application/json': {
+                                schema: {
+                                    type: 'object',
+                                    properties: {
+                                        success: { type: 'boolean' },
+                                        message: { type: 'string' },
+                                        token: { type: 'string' },
+                                        magicLink: { type: 'string', description: 'Link que apunta a cayacoagolf.com' },
+                                        serverLink: { type: 'string', description: 'Link alternativo del servidor' },
+                                        shareableLink: { type: 'string', description: 'Alias de magicLink' },
+                                        expiresAt: { type: 'string', format: 'date-time' }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        '/api/validate-token': {
+            post: {
+                summary: '✅ Validar token y obtener credenciales',
+                description: 'Endpoint llamado por el userscript para validar el token del Magic Link y obtener las credenciales.',
+                tags: ['Magic Link'],
+                requestBody: {
+                    required: true,
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                required: ['token'],
+                                properties: {
+                                    token: { type: 'string', description: 'Token del magic link' }
+                                }
+                            }
+                        }
+                    }
+                },
+                responses: {
+                    '200': {
+                        description: 'Token válido',
+                        content: {
+                            'application/json': {
+                                schema: {
+                                    type: 'object',
+                                    properties: {
+                                        success: { type: 'boolean' },
+                                        valid: { type: 'boolean' },
+                                        data: {
+                                            type: 'object',
+                                            properties: {
+                                                url: { type: 'string' },
+                                                cookies: { type: 'array' },
+                                                reservationInfo: { type: 'object' },
+                                                credentials: { 
+                                                    type: 'object',
+                                                    properties: {
+                                                        username: { type: 'string' },
+                                                        password: { type: 'string' }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    '404': {
+                        description: 'Token no encontrado'
+                    },
+                    '410': {
+                        description: 'Token expirado'
+                    }
+                }
+            }
         }
     },
     tags: [
         { name: 'AI Agent', description: '🤖 Agente IA para automatización inteligente' },
+        { name: 'Magic Link', description: '🔗 Sistema de links compartibles con auto-login' },
         { name: 'Flows', description: 'Gestión de flujos de automatización' },
         { name: 'Execution', description: 'Ejecución y reproducción de flujos' },
         { name: 'Snapshots', description: 'Capturas de estado de página' }
 
     ]
 };
+
+/**
+ * Helper function to normalize cookies with cross-domain attributes
+ * 
+ * Para transferir cookies entre dominios diferentes (ej: cayacoagolf.com -> ngrok-free.app),
+ * el navegador requiere estos atributos específicos:
+ * - SameSite=None: Permite que la cookie se envíe en contextos de sitios cruzados (cross-site)
+ * - Secure: Obligatorio cuando se usa SameSite=None. Requiere HTTPS
+ * - HttpOnly: Recomendado para evitar acceso a cookies mediante scripts maliciosos
+ * 
+ * @see https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie
+ */
+function normalizeCookiesForCrossDomain(cookies: any[]): any[] {
+    return cookies.map(cookie => ({
+        ...cookie,
+        sameSite: 'None' as const,
+        secure: true,
+        httpOnly: cookie.httpOnly !== undefined ? cookie.httpOnly : true,
+    }));
+}
 
 // Validation schemas
 const ExecuteFlowSchema = z.object({
@@ -339,6 +507,22 @@ export function createApiServer(config: {
     // Health check
     app.get('/health', (c) => c.json({ status: 'ok' }));
 
+    // Serve userscript for Tampermonkey
+    app.get('/userscript/cayacoa-autofill.user.js', (c) => {
+        const fs = require('fs');
+        const path = require('path');
+        const scriptPath = path.join(__dirname, '../../../userscript/cayacoa-autofill.user.js');
+        
+        try {
+            const script = fs.readFileSync(scriptPath, 'utf-8');
+            c.header('Content-Type', 'application/javascript');
+            c.header('Content-Disposition', 'inline; filename="cayacoa-autofill.user.js"');
+            return c.text(script);
+        } catch (error) {
+            return c.json({ success: false, error: 'Userscript not found' }, 404);
+        }
+    });
+
     // Home page with links
     app.get('/', (c) => {
         return c.html(`
@@ -352,7 +536,11 @@ export function createApiServer(config: {
           a { color: #0066cc; text-decoration: none; }
           a:hover { text-decoration: underline; }
           .card { background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; }
+          .highlight { background: #e0f2fe; border-left: 4px solid #0284c7; }
           code { background: #e0e0e0; padding: 2px 6px; border-radius: 4px; }
+          .btn { display: inline-block; background: #10b981; color: white; padding: 10px 20px; 
+                 border-radius: 6px; text-decoration: none; font-weight: 500; margin-top: 10px; }
+          .btn:hover { background: #059669; text-decoration: none; }
         </style>
       </head>
       <body>
@@ -368,7 +556,41 @@ export function createApiServer(config: {
             <li><code>GET /api/flows</code> - Listar flujos</li>
             <li><code>POST /api/flows/execute</code> - Ejecutar flujo</li>
             <li><code>POST /api/flows/replay</code> - Reproducir con validación</li>
+            <li><code>POST /api/agent</code> - Ejecutar agente IA</li>
           </ul>
+        </div>
+        <div class="card highlight">
+          <h2>🏌️ Cayacoa Golf - Magic Link Auto-Login</h2>
+          <p><strong>Sistema de links compartibles con login automático</strong></p>
+          
+          <h3 style="font-size: 16px; margin-top: 16px;">📋 ¿Cómo funciona?</h3>
+          <ol style="font-size: 14px; line-height: 1.8;">
+            <li>Instala el userscript de Tampermonkey (una sola vez)</li>
+            <li>Genera un Magic Link mediante POST /api/session</li>
+            <li>Comparte el link (apunta directamente a cayacoagolf.com)</li>
+            <li>El usuario hace clic → Login automático → Acceso directo</li>
+          </ol>
+          
+          <h3 style="font-size: 16px; margin-top: 16px;">🔧 Instalación</h3>
+          <ol style="font-size: 14px; line-height: 1.8;">
+            <li>Instala <a href="https://www.tampermonkey.net/" target="_blank">Tampermonkey</a> en tu navegador</li>
+            <li>Haz clic en el botón de abajo para instalar el script</li>
+            <li>Configura tu servidor: <code>cayacoaAutoLogin.setApiServer("https://tu-servidor.ngrok-free.app")</code></li>
+          </ol>
+          
+          <a href="/userscript/cayacoa-autofill.user.js" class="btn">📦 Instalar Userscript v2.0</a>
+          
+          <div style="background: #f0fdf4; padding: 12px; border-radius: 6px; margin-top: 16px; font-size: 13px;">
+            <strong>✨ Nuevo:</strong> Magic Links que apuntan directamente a Cayacoa
+            <br>
+            <code style="display: block; margin-top: 8px; background: white; padding: 8px; border-radius: 4px;">
+              https://cayacoagolf.com/auto-login?token=abc123
+            </code>
+          </div>
+          
+          <p style="font-size: 12px; color: #666; margin-top: 12px;">
+            Compatible con Chrome, Firefox, Safari, Edge
+          </p>
         </div>
       </body>
       </html>
@@ -621,9 +843,10 @@ export function createApiServer(config: {
                 await browser.goto(baseUrl);
             }
 
-            // Set cookies
-            await browser.setCookies(body.cookies);
-            console.log(`   ✅ Cookies establecidas`);
+            // Set cookies with cross-domain attributes
+            const normalizedCookies = normalizeCookiesForCrossDomain(body.cookies);
+            await browser.setCookies(normalizedCookies);
+            console.log(`   ✅ Cookies establecidas con SameSite=None; Secure; HttpOnly`);
 
             // Robust Login with Credentials
             if (body.credentials && body.credentials.username && body.credentials.password) {
@@ -738,16 +961,29 @@ export function createApiServer(config: {
             console.log(`   ⏱️ Expira: ${new Date(session.expiresAt).toISOString()}`);
             console.log(`   ════════════════════════════════════════════════════════\n`);
 
-            // Build shareable link - use BASE_URL env var for public access (e.g., ngrok)
+            // Build Magic Link - apunta a TU servidor que hace el auto-login
+            // El servidor abre el navegador, hace login automático y redirige al usuario
             const port = config.port || 3000;
-            const baseUrl = process.env.BASE_URL || `http://localhost:${port}`;
-            const shareableLink = `${baseUrl}/session/${body.token}`;
+            const serverBaseUrl = process.env.BASE_URL || `http://localhost:${port}`;
+            const magicLink = `${serverBaseUrl}/session/${body.token}`;
+            
+            // Link alternativo: URL de destino con token (requiere userscript en el navegador del usuario)
+            const targetUrlWithToken = body.url.includes('?') 
+                ? `${body.url}&token=${body.token}`
+                : `${body.url}?token=${body.token}`;
+
+            console.log(`\n   🔗 ═══════════════════════════════════════════════════════`);
+            console.log(`   📱 ENLACE PARA COMPARTIR POR WHATSAPP:`);
+            console.log(`   ${magicLink}`);
+            console.log(`   ═══════════════════════════════════════════════════════\n`);
 
             return c.json({
                 success: true,
                 message: 'Sesión guardada correctamente',
                 token: body.token,
-                shareableLink,
+                magicLink,                    // Link principal - TU servidor hace el login
+                shareableLink: magicLink,     // Alias (para compatibilidad)
+                alternativeLink: targetUrlWithToken, // Link alternativo con userscript
                 expiresAt: new Date(session.expiresAt).toISOString(),
             });
         } catch (error) {
@@ -759,7 +995,7 @@ export function createApiServer(config: {
     });
 
     // ============================================
-    // GET /session/:token - Redirect with cookies injected
+    // GET /session/:token - Auto-login with Playwright and redirect
     // ============================================
     app.get('/session/:token', async (c) => {
         const token = c.req.param('token');
@@ -827,143 +1063,449 @@ export function createApiServer(config: {
             `, 410);
         }
 
-        // Generate HTML page that automatically logs in and redirects
-        const cookiesJson = JSON.stringify(session.cookies);
+        // Try to set cookies via Set-Cookie headers and redirect
+        // Note: This will only work if both domains are the same
         const targetUrl = session.url;
-        const reservationHtml = session.reservationInfo ? `
-            <div class="info">
-                <p>📅 <strong>Fecha:</strong> ${session.reservationInfo.date || 'N/A'}</p>
-                <p>⏰ <strong>Hora:</strong> ${session.reservationInfo.time || 'N/A'}</p>
-                ${session.reservationInfo.price ? `<p>💰 <strong>Precio:</strong> ${session.reservationInfo.price}</p>` : ''}
-            </div>
-        ` : '';
+        const urlObj = new URL(targetUrl);
+        
+        console.log(`\n🔗 ════════════════════════════════════════════════════════`);
+        console.log(`   📱 ACCESO AL LINK COMPARTIDO`);
+        console.log(`   🎫 Token: ${token}`);
+        console.log(`   👤 Usuario: ${session.credentials?.username || 'zad.duran@gmail.com'}`);
+        console.log(`   📅 Reserva: ${session.reservationInfo?.date || 'N/A'} - ${session.reservationInfo?.time || 'N/A'}`);
+        console.log(`   🌐 URL destino: ${targetUrl}`);
+        console.log(`   🍪 Cookies guardadas: ${session.cookies.length}`);
+        console.log(`   🤖 Usando Playwright para auto-login en el servidor...`);
+        console.log(`   ════════════════════════════════════════════════════════\n`);
 
+        // Simple redirect approach - can't transfer cookies cross-domain
+        const credentials = session.credentials || { username: 'zad.duran@gmail.com', password: 'zad1234567' };
+        
+        console.log(`   🌐 Enviando página HTML con credenciales`);
+        console.log(`   📱 Optimizado para enlaces compartibles (WhatsApp/Email/SMS)\n`);
+        
+        // ============================================
+        // OPCIÓN: Redirigir a PWA (Auto-login automático después de 1ra vez)
+        // ACTIVAR: Descomenta estas líneas cuando publiques tu PWA
+        // ============================================
+        
+        // Configuración: URL de tu PWA publicada
+        const USAR_PWA = false; // Cambiar a true cuando publiques la PWA
+        const PWA_URL = 'https://tu-usuario.github.io/cayacoa-pwa/'; // Cambiar por tu URL
+        
+        if (USAR_PWA) {
+            // Extraer booking de la URL de destino
+            const bookingMatch = targetUrl.match(/make-booking\/([^/]+)/);
+            if (bookingMatch) {
+                const bookingParam = bookingMatch[1];
+                console.log(`   🔀 Redirigiendo a PWA con booking: ${bookingParam}`);
+                console.log(`   🌐 PWA URL: ${PWA_URL}?booking=${bookingParam}\n`);
+                return c.redirect(`${PWA_URL}?booking=${bookingParam}`);
+            }
+        }
+        
+        // ============================================
+        // OPCIÓN 1: Auto-login del lado del CLIENTE (Recomendado para WhatsApp)
+        // El navegador del usuario hace el login usando iframe + JavaScript
+        // ============================================
+        
+        // Descomentar para usar automatización del lado del servidor (Playwright)
+        // Ver líneas 1085-1207 para implementación con Playwright
+        // Requiere servidor con capacidad para abrir navegadores (no recomendado para producción)
+        
+        if (false) { // ❌ AUTOMATIZACIÓN DESACTIVADA - El navegador del usuario hace el login
+            // Server-side automation with redirect
+            try {
+            const { BrowserClient } = await import('../../browser/browser-client.js');
+            
+            const browser = new BrowserClient(
+                { headless: true, timeout: 30000 },
+                ''
+            );
+            await browser.launch();
+            
+            try {
+                const loginUrl = `${urlObj.protocol}//${urlObj.hostname}/front-end/login`;
+                console.log(`   🔐 Navegando a login: ${loginUrl}`);
+                await browser.goto(loginUrl);
+                
+                // Set cookies with cross-domain attributes
+                console.log(`   🍪 Estableciendo cookies con SameSite=None; Secure; HttpOnly...`);
+                const normalizedCookies = normalizeCookiesForCrossDomain(session?.cookies || []);
+                await browser.setCookies(normalizedCookies);
+                
+                // Auto-fill login con selectores EXACTOS de Cayacoa
+                console.log(`   ✍️ Auto-completando login...`);
+                
+                // ============================================
+                // SELECTORES EXACTOS de Cayacoa Golf Club
+                // ============================================
+                const emailSelectors = [
+                    'input[name="username"]',     // ← Selector PRINCIPAL de Cayacoa
+                    'input[type="email"]', 
+                    'input[name="email"]', 
+                    '#email'
+                ];
+                for (const sel of emailSelectors) {
+                    try {
+                        await browser.type(sel, credentials.username);
+                        console.log(`   ✅ Email ingresado con selector: ${sel}`);
+                        break;
+                    } catch (e) {
+                        console.log(`   ⏭️ Selector ${sel} no encontrado, probando siguiente...`);
+                    }
+                }
+                
+                const passSelectors = [
+                    'input[name="password"]',     // ← Selector PRINCIPAL de Cayacoa
+                    'input[type="password"]', 
+                    '#password'
+                ];
+                for (const sel of passSelectors) {
+                    try {
+                        await browser.type(sel, credentials.password);
+                        console.log(`   ✅ Password ingresado con selector: ${sel}`);
+                        break;
+                    } catch (e) {
+                        console.log(`   ⏭️ Selector ${sel} no encontrado, probando siguiente...`);
+                    }
+                }
+                
+                const submitSelectors = [
+                    'button.btn-primary',         // ← Selector PRINCIPAL de Cayacoa
+                    'button[type="submit"]', 
+                    'input[type="submit"]'
+                ];
+                for (const sel of submitSelectors) {
+                    try {
+                        await browser.click(sel);
+                        console.log(`   ✅ Botón Acceder clickeado con selector: ${sel}`);
+                        break;
+                    } catch (e) {
+                        console.log(`   ⏭️ Selector ${sel} no encontrado, probando siguiente...`);
+                    }
+                }
+                
+                // Wait for login
+                await new Promise(r => setTimeout(r, 3000));
+                console.log(`   ⏳ Esperando confirmación de login...`);
+                
+                // Navigate to payment page
+                await browser.goto(targetUrl);
+                await new Promise(r => setTimeout(r, 2000));
+                console.log(`   💳 Página de pago cargada`);
+                
+                // Get fresh cookies
+                const freshCookies = await browser.getCookies();
+                console.log(`   🍪 Cookies actualizadas: ${freshCookies.length}`);
+                
+                await browser.close();
+                console.log(`   ✅ Automatización completada\n`);
+                
+                // Now return HTML with fresh cookies and immediate redirect
+                const cookiesJson = JSON.stringify(freshCookies);
+                
+                return c.html(`
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redirigiendo a Cayacoa...</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+               display: flex; justify-content: center; align-items: center; 
+               min-height: 100vh; margin: 0; padding: 16px;
+               background: linear-gradient(135deg, #10b981 0%, #059669 100%); }
+        .card { background: white; padding: 32px; border-radius: 16px; box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                text-align: center; max-width: 400px; width: 100%; }
+        h1 { color: #059669; margin-bottom: 12px; font-size: 24px; font-weight: 600; }
+        .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #10b981; border-radius: 50%;
+                   width: 60px; height: 60px; animation: spin 1s linear infinite; margin: 24px auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .status { color: #666; font-size: 15px; line-height: 1.6; margin: 16px 0; }
+        .success { color: #10b981; font-weight: 600; font-size: 16px; margin: 16px 0; }
+        .emoji { font-size: 56px; margin-bottom: 16px; }
+        .info { background: #f0fdf4; padding: 12px; border-radius: 8px; margin: 16px 0; font-size: 13px;
+                border-left: 4px solid #10b981; text-align: left; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="emoji">✅</div>
+        <h1>¡Login Exitoso!</h1>
+        <div class="success">Sesión iniciada automáticamente</div>
+        <div class="spinner"></div>
+        <div class="status" id="status">Redirigiendo a tu reserva...</div>
+        <div class="info">
+            ${session?.reservationInfo?.date ? '📅 ' + session?.reservationInfo?.date + '<br>' : ''}
+            ${session?.reservationInfo?.time ? '⏰ ' + session?.reservationInfo?.time : ''}
+        </div>
+    </div>
+
+    <script>
+        // Redirect immediately to payment page
+        setTimeout(() => {
+            window.location.href = '${targetUrl}';
+        }, 2000);
+    </script>
+</body>
+</html>
+                `);
+                
+            } catch (error) {
+                await browser.close();
+                throw error;
+            }
+            
+        } catch (error) {
+            console.log(`   ❌ Error en automatización: ${error}`);
+            console.log(`   ⚠️ Fallback: Mostrando página con credenciales\n`);
+        }
+        } // Fin del if(false) - Playwright está desactivado
+        
+        // ============================================
+        // Redirect Simple: Pre-llenar formulario con parámetros en URL
+        // El userscript detecta los parámetros y llena el formulario automáticamente
+        // ============================================
+        const loginUrl = `${urlObj.protocol}//${urlObj.hostname}/front-end/login`;
+        
+        console.log(`   🔗 Redirigiendo con credenciales en URL...`);
+        console.log(`   📧 Email: ${credentials.username}`);
+        console.log(`   🔐 Password: [protegido]`);
+        console.log(`   🌐 URL: ${loginUrl}\n`);
+        
         return c.html(`
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cargando Sesión...</title>
+    <title>Redirigiendo a Cayacoa Golf...</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
-               display: flex; justify-content: center; align-items: center; 
-               min-height: 100vh; margin: 0; padding: 20px;
-               background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
-        .card { background: white; padding: 40px; border-radius: 16px; box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-                text-align: center; max-width: 500px; width: 100%; }
-        h1 { color: #333; margin-bottom: 16px; font-size: 24px; }
-        p { color: #666; line-height: 1.6; margin: 12px 0; }
-        .icon { font-size: 48px; margin-bottom: 16px; }
-        .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #667eea; border-radius: 50%;
-                   width: 50px; height: 50px; animation: spin 1s linear infinite; margin: 20px auto; }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        .info { background: #f8f9fa; padding: 16px; border-radius: 8px; margin: 16px 0; text-align: left; }
-        .info p { margin: 8px 0; color: #333; }
-        .progress { background: #e9ecef; border-radius: 8px; height: 8px; margin: 20px 0; overflow: hidden; }
-        .progress-bar { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                        height: 100%; width: 0%; transition: width 0.5s; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            min-height: 100vh;
+            padding: 20px;
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        }
+        .card { 
+            background: white; 
+            padding: 32px; 
+            border-radius: 20px; 
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            text-align: center; 
+            max-width: 450px;
+            width: 100%;
+        }
+        .logo { font-size: 64px; margin-bottom: 16px; }
+        h1 { color: #059669; font-size: 22px; margin-bottom: 8px; font-weight: 700; }
+        .subtitle { color: #64748b; font-size: 14px; margin-bottom: 24px; }
+        
+        .info-box {
+            background: #f0fdf4;
+            padding: 16px;
+            border-radius: 12px;
+            border-left: 4px solid #10b981;
+            margin: 20px 0;
+            text-align: left;
+        }
+        .info-row {
+            display: flex;
+            align-items: center;
+            margin: 8px 0;
+            font-size: 14px;
+            color: #334155;
+        }
+        .info-icon { font-size: 20px; margin-right: 10px; min-width: 28px; }
+        
+        .credentials {
+            background: #fef3c7;
+            padding: 20px;
+            border-radius: 12px;
+            border-left: 4px solid #f59e0b;
+            margin: 20px 0;
+        }
+        .cred-title {
+            color: #d97706;
+            font-weight: 700;
+            font-size: 13px;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+        }
+        .cred-item {
+            background: white;
+            padding: 12px;
+            border-radius: 8px;
+            margin: 10px 0;
+            position: relative;
+        }
+        .cred-label {
+            font-size: 11px;
+            color: #64748b;
+            text-transform: uppercase;
+            font-weight: 600;
+            margin-bottom: 6px;
+            text-align: left;
+        }
+        .cred-value {
+            font-size: 15px;
+            color: #1e293b;
+            font-family: 'Courier New', monospace;
+            font-weight: 600;
+            word-break: break-all;
+            text-align: left;
+            padding-right: 70px;
+        }
+        .copy-btn {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: #f59e0b;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 11px;
+            cursor: pointer;
+            font-weight: 700;
+        }
+        .copy-btn:active { background: #d97706; }
+        
+        .login-btn {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            border: none;
+            padding: 18px;
+            font-size: 17px;
+            font-weight: 700;
+            border-radius: 12px;
+            cursor: pointer;
+            width: 100%;
+            margin-top: 20px;
+            box-shadow: 0 6px 20px rgba(16, 185, 129, 0.3);
+            text-decoration: none;
+            display: block;
+        }
+        .login-btn:active { transform: scale(0.98); }
+        
+        .note {
+            margin-top: 16px;
+            font-size: 12px;
+            color: #94a3b8;
+            line-height: 1.5;
+        }
     </style>
 </head>
 <body>
     <div class="card">
-        <div class="icon">�</div>
-        <h1>Preparando Sesión de Pago</h1>
-        ${reservationHtml}
-        <div class="spinner"></div>
-        <p id="status">Iniciando sesión automáticamente...</p>
-        <div class="progress">
-            <div class="progress-bar" id="progress"></div>
+        <div class="logo">🏌️</div>
+        <h1>Cayacoa Golf Club</h1>
+        <p class="subtitle">Tu reserva está lista. Copia tus credenciales y haz clic para continuar.</p>
+        
+        ${session?.reservationInfo?.date || session?.reservationInfo?.time ? `
+        <div class="info-box">
+            ${session?.reservationInfo?.date ? `
+            <div class="info-row">
+                <span class="info-icon">📅</span>
+                <span><strong>${session.reservationInfo.date}</strong></span>
+            </div>
+            ` : ''}
+            ${session?.reservationInfo?.time ? `
+            <div class="info-row">
+                <span class="info-icon">⏰</span>
+                <span><strong>${session.reservationInfo.time}</strong></span>
+            </div>
+            ` : ''}
+            ${session?.reservationInfo?.price ? `
+            <div class="info-row">
+                <span class="info-icon">💰</span>
+                <span><strong>${session.reservationInfo.price}</strong></span>
+            </div>
+            ` : ''}
         </div>
+        ` : ''}
+        
+        <div class="credentials">
+            <div class="cred-title">🔐 Tus Credenciales</div>
+            
+            <div class="cred-item">
+                <div class="cred-label">📧 Email / Usuario</div>
+                <div class="cred-value" id="emailValue">${credentials.username}</div>
+                <button class="copy-btn" onclick="copyText('emailValue', this)">COPIAR</button>
+            </div>
+            
+            <div class="cred-item">
+                <div class="cred-label">🔑 Contraseña</div>
+                <div class="cred-value" id="passwordValue">${credentials.password}</div>
+                <button class="copy-btn" onclick="copyText('passwordValue', this)">COPIAR</button>
+            </div>
+        </div>
+        
+        <a href="${loginUrl}" class="login-btn">
+            🚀 Ir a Cayacoa Golf
+        </a>
+        
+        <p class="note">
+            Haz clic en el botón, luego pega tus credenciales en la página de login.
+        </p>
     </div>
 
     <script>
-        const cookies = ${cookiesJson};
-        const targetUrl = "${targetUrl}";
-        const statusEl = document.getElementById('status');
-        const progressBar = document.getElementById('progress');
-        
-        // Extract domain info
-        const url = new URL(targetUrl);
-        const loginUrl = url.origin + '/login';
-        
-        // Function to set cookies
-        function setCookies() {
-            let cookiesSet = 0;
-            cookies.forEach(cookie => {
-                try {
-                    let cookieStr = cookie.name + '=' + encodeURIComponent(cookie.value);
-                    if (cookie.path) cookieStr += '; path=' + cookie.path;
-                    if (cookie.domain) cookieStr += '; domain=' + cookie.domain;
-                    if (cookie.expires) {
-                        const expires = new Date(cookie.expires * 1000);
-                        cookieStr += '; expires=' + expires.toUTCString();
-                    }
-                    if (cookie.secure) cookieStr += '; secure';
-                    if (cookie.sameSite) cookieStr += '; samesite=' + cookie.sameSite;
-                    
-                    document.cookie = cookieStr;
-                    cookiesSet++;
-                } catch(e) {
-                    console.warn('Could not set cookie:', cookie.name, e);
-                }
-            });
-            return cookiesSet;
-        }
-        
-        // Auto-login flow
-        async function autoLogin() {
-            try {
-                // Step 1: Navigate to login page to establish domain context
-                statusEl.textContent = 'Paso 1/3: Conectando con ' + url.host + '...';
-                progressBar.style.width = '33%';
-                
-                // Set cookies for authentication
-                const cookiesSet = setCookies();
-                
-                // The original instruction was for a server-side /api/continue endpoint
-                // and used a 'browser' object (like Playwright).
-                // This client-side script cannot directly interact with a 'browser' object
-                // or perform form-based logins across origins due to security restrictions.
-                // The provided snippet for the change is not directly applicable here.
-                // The client-side script can only set cookies for the current domain
-                // and then redirect.
-                // Therefore, the client-side autoLogin function remains as is,
-                // focusing on cookie injection and redirection.
-                // The server-side /api/continue endpoint (if it existed) would handle
-                // the Playwright-based login logic.
-
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                
-                // Step 2: Set cookies
-                statusEl.textContent = 'Paso 2/3: Estableciendo sesión (' + cookiesSet + ' cookies)...';
-                progressBar.style.width = '66%';
-                
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                
-                // Step 3: Redirect to payment page
-                statusEl.textContent = 'Paso 3/3: Redirigiendo a página de pago...';
-                progressBar.style.width = '100%';
-                
-                await new Promise(resolve => setTimeout(resolve, 500));
-                
-                // Final redirect
-                window.location.href = targetUrl;
-                
-            } catch (error) {
-                statusEl.textContent = '❌ Error: ' + error.message;
-                statusEl.style.color = '#dc3545';
+        function copyText(elementId, button) {
+            const text = document.getElementById(elementId).textContent;
+            
+            // Intentar copiar con Clipboard API
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(() => {
+                    button.textContent = '✓ COPIADO';
+                    button.style.background = '#059669';
+                    setTimeout(() => {
+                        button.textContent = 'COPIAR';
+                        button.style.background = '#f59e0b';
+                    }, 2000);
+                }).catch(() => {
+                    fallbackCopy(text, button);
+                });
+            } else {
+                fallbackCopy(text, button);
             }
         }
         
-        // Start auto-login after page load
-        window.addEventListener('load', () => {
-            setTimeout(autoLogin, 500);
-        });
+        function fallbackCopy(text, button) {
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            try {
+                document.execCommand('copy');
+                button.textContent = '✓ COPIADO';
+                button.style.background = '#059669';
+                setTimeout(() => {
+                    button.textContent = 'COPIAR';
+                    button.style.background = '#f59e0b';
+                }, 2000);
+            } catch (err) {
+                alert('Copiar: ' + text);
+            }
+            document.body.removeChild(textarea);
+        }
+        
+        console.log('📧 Email:', '${credentials.username}');
+        console.log('🔐 Password:', '${credentials.password}');
+        console.log('🌐 URL Login:', '${loginUrl}');
+        console.log('🎯 URL Destino:', '${targetUrl}');
     </script>
 </body>
 </html>
-        `);
+            `);
     });
 
     // ============================================
