@@ -187,10 +187,19 @@ const SNAPSHOT_SCRIPT = `
         
         // Skip div elements that are just containers (no meaningful name)
         if (tag === 'div') {
-            const name = getElementDescription(el);
-            // If the div's text is too long or matches child text, it's probably a container
-            if (name.length > 50 || el.querySelectorAll('a, button, input').length > 0) {
-                return; // Skip container divs
+            const classes = (el.className || '').toLowerCase();
+            // Exception: keep time slot divs (empty-tt, filled-tt, bookit, etc.)
+            const isTimeSlot = classes.includes('empty-tt') || 
+                               classes.includes('filled-tt') || 
+                               classes.includes('bookit') ||
+                               classes.includes('-tt') ||
+                               el.querySelector('.thetime');
+            if (!isTimeSlot) {
+                const name = getElementDescription(el);
+                // If the div's text is too long or matches child text, it's probably a container
+                if (name.length > 50 || el.querySelectorAll('a, button, input').length > 0) {
+                    return; // Skip container divs
+                }
             }
         }
         
@@ -607,6 +616,12 @@ const SNAPSHOT_SCRIPT = `
         '[class*="Horario"]',
         '[class*="tee"]',
         '[class*="Tee"]',
+        // Golf booking specific (Cayaco, etc.)
+        '.empty-tt',
+        '.filled-tt',
+        '.bookit',
+        '.thetime',
+        '[class*="-tt"]',
         '[class*="turno"]',
         '[class*="Turno"]',
         '[class*="disponible"]',
@@ -2583,10 +2598,13 @@ export class BrowserClient {
                 const textNoColon = text.replace(':', '');
 
                 if (text === target || textNoColon === targetNoColon) {
-                    // Find the parent .bookit container
+                    // Find the parent .bookit or .empty-tt container
                     let bookitParent = span.parentElement;
                     for (let i = 0; i < 5 && bookitParent; i++) {
-                        if (bookitParent.classList.contains('bookit') || bookitParent.hasAttribute('data-tt')) {
+                        if (bookitParent.classList.contains('bookit') || 
+                            bookitParent.classList.contains('empty-tt') ||
+                            bookitParent.classList.contains('filled-tt') ||
+                            bookitParent.hasAttribute('data-tt')) {
                             break;
                         }
                         bookitParent = bookitParent.parentElement;
@@ -2638,6 +2656,9 @@ export class BrowserClient {
                         for (let i = 0; i < 5 && current; i++) {
                             if (current.hasAttribute('data-tt') ||
                                 current.classList.contains('bookit') ||
+                                current.classList.contains('empty-tt') ||
+                                current.classList.contains('filled-tt') ||
+                                (current.className || '').includes('-tt') ||
                                 current.hasAttribute('onclick') ||
                                 current.tagName === 'A' ||
                                 current.tagName === 'BUTTON' ||
