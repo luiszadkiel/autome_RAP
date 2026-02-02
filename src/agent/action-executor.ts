@@ -15,6 +15,9 @@ export class ActionExecutor {
     private screenshotsDir: string;
     private stepNumber: number = 0;
     private screenshotOnEachStep: boolean;
+    private loginAttempts: number = 0;
+    private maxLoginAttempts: number = 3;
+    private lastLoginUrl: string = '';
 
     constructor(params: {
         browser: BrowserClient;
@@ -52,8 +55,8 @@ export class ActionExecutor {
                 case 'click':
                     if (!action.ref) throw new Error('click requires ref');
                     await this.browser.click(action.ref, element);
-                    // Wait for potential navigation
-                    await this.browser.wait({ timeout: 2000 }).catch(() => { });
+                    // Brief wait for potential navigation (actual navigation detection happens in web-agent)
+                    await this.browser.wait({ timeout: 500 }).catch(() => { });
                     break;
 
                 case 'type':
@@ -190,12 +193,36 @@ export class ActionExecutor {
 
                 case 'login':
                     // Quick login: fill form and click submit
-                    // Check if already logged in by looking for common login form elements
+                    // Check if already logged in
                     const isLoggedIn = await this.browser.isLoggedIn();
                     if (isLoggedIn) {
-                        console.log('Already logged in, skipping login action.');
+                        console.log('   ✅ Already logged in, skipping login action.');
+                        this.loginAttempts = 0; // Reset counter
                         break;
                     }
+
+                    // Check if there's actually a login form on the page
+                    const hasLoginForm = await this.browser.hasLoginForm();
+                    if (!hasLoginForm) {
+                        console.log('   ⚠️ No login form detected on page, skipping login action.');
+                        break;
+                    }
+
+                    // Track login attempts to prevent infinite loops
+                    const currentUrl = this.browser.getUrl();
+                    if (currentUrl === this.lastLoginUrl) {
+                        this.loginAttempts++;
+                    } else {
+                        this.loginAttempts = 1;
+                        this.lastLoginUrl = currentUrl;
+                    }
+
+                    if (this.loginAttempts > this.maxLoginAttempts) {
+                        console.log(`   ⚠️ Max login attempts (${this.maxLoginAttempts}) reached on this page. Login may have failed or page state is incorrect.`);
+                        throw new Error(`Login failed after ${this.maxLoginAttempts} attempts. The page might not be a login form or credentials are incorrect.`);
+                    }
+
+                    console.log(`   🔐 Login attempt ${this.loginAttempts}/${this.maxLoginAttempts}`);
 
                     const filled = await this.browser.fillLoginForm(
                         this.credentials?.email,
@@ -209,7 +236,16 @@ export class ActionExecutor {
                     if (filled) {
                         await this.browser.clickLoginButton();
                         // Wait for navigation after login
-                        await this.browser.wait({ timeout: 3000 }).catch(() => { });
+                        await this.browser.wait({ timeout: 1500 }).catch(() => { });
+                        
+                        // Verify if login was successful
+                        const loginSuccessful = await this.browser.isLoggedIn();
+                        if (loginSuccessful) {
+                            console.log('   ✅ Login successful!');
+                            this.loginAttempts = 0; // Reset counter on success
+                        }
+                    } else {
+                        console.log('   ⚠️ Could not fill login form fields.');
                     }
                     break;
 

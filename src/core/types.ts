@@ -67,6 +67,23 @@ export interface AgentResult {
     error?: string;
     /** Total time taken in ms */
     duration?: number;
+    /** Detailed execution summary */
+    executionSummary?: {
+        /** Total number of actions performed */
+        totalActions: number;
+        /** Final URL after execution */
+        finalUrl: string;
+        /** List of pages visited */
+        pagesVisited: string[];
+        /** Detailed list of actions performed */
+        actionsPerformed: {
+            action: string;
+            detail: string;
+            reason: string;
+        }[];
+        /** Human-readable summary text */
+        actionsSummaryText: string;
+    };
 }
 
 export interface StepResult {

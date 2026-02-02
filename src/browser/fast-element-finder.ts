@@ -76,25 +76,59 @@ export class FastElementFinder {
             switch (strategy.type) {
                 case 'css':
                     if (!strategy.value) return null;
-                    return await page.$(strategy.value);
+                    try {
+                        const loc = page.locator(strategy.value);
+                        // Filter for visible elements first since snapshot only includes visible ones
+                        const visibleLoc = loc.filter({ visible: true });
+                        if (await visibleLoc.count() > 0) {
+                            return await visibleLoc.first().elementHandle();
+                        }
+                        return await page.$(strategy.value);
+                    } catch (e) {
+                        return null;
+                    }
 
                 case 'xpath':
                     if (!strategy.value) return null;
-                    // Check if it already starts with xpath= or //
-                    const xpath = strategy.value.startsWith('//') || strategy.value.startsWith('xpath=')
-                        ? strategy.value
-                        : `xpath=${strategy.value}`;
-                    return await page.$(xpath);
+                    try {
+                        const xpath = strategy.value.startsWith('//') || strategy.value.startsWith('xpath=')
+                            ? strategy.value
+                            : `xpath=${strategy.value}`;
+                        const loc = page.locator(xpath);
+                        const visibleLoc = loc.filter({ visible: true });
+                        if (await visibleLoc.count() > 0) {
+                            return await visibleLoc.first().elementHandle();
+                        }
+                        return await page.$(xpath);
+                    } catch (e) {
+                        return null;
+                    }
 
                 case 'text':
                     if (!strategy.value) return null;
-                    return await page.getByText(strategy.value).elementHandle();
+                    try {
+                        const loc = page.getByText(strategy.value);
+                        const visibleLoc = loc.filter({ visible: true });
+                        if (await visibleLoc.count() > 0) {
+                            return await visibleLoc.first().elementHandle();
+                        }
+                        return await loc.elementHandle();
+                    } catch (e) {
+                        return null;
+                    }
 
                 case 'role':
                     if (!strategy.role) return null;
-                    return await page.getByRole(strategy.role as any, {
-                        name: strategy.name
-                    }).elementHandle();
+                    try {
+                        const loc = page.getByRole(strategy.role as any, { name: strategy.name });
+                        const visibleLoc = loc.filter({ visible: true });
+                        if (await visibleLoc.count() > 0) {
+                            return await visibleLoc.first().elementHandle();
+                        }
+                        return await loc.elementHandle();
+                    } catch (e) {
+                        return null;
+                    }
 
                 default:
                     return null;
