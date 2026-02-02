@@ -186,6 +186,23 @@ export class ActionExecutor {
                     await this.browser.closeCurrentTab();
                     break;
 
+                case 'selectTimeSlot':
+                    // Efficient time slot selection - scrolls directly to target time and clicks
+                    if (!action.value) throw new Error('selectTimeSlot requires value (target time)');
+                    console.log(`   🕐 Selecting time slot: ${action.value}`);
+                    const timeResult = await this.browser.findAndClickTimeSlot(action.value);
+
+                    if (!timeResult.available) {
+                        // Time slot not available, but don't fail - let agent decide what to do
+                        console.log(`   ⚠️ Time slot ${action.value} not available`);
+                        if (timeResult.nearbyAvailable.length > 0) {
+                            console.log(`   💡 Nearby available: ${timeResult.nearbyAvailable.slice(0, 5).join(', ')}`);
+                        }
+                        // Store result for agent to check
+                        action.result = timeResult;
+                    }
+                    break;
+
                 case 'done':
                     // This action indicates the task is complete.
                     // The agent should handle the final state, but we mark it as successful here.
@@ -237,7 +254,7 @@ export class ActionExecutor {
                         await this.browser.clickLoginButton();
                         // Wait for navigation after login
                         await this.browser.wait({ timeout: 1500 }).catch(() => { });
-                        
+
                         // Verify if login was successful
                         const loginSuccessful = await this.browser.isLoggedIn();
                         if (loginSuccessful) {

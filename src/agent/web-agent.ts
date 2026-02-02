@@ -28,11 +28,151 @@ export class WebAgent {
     private options: AgentOptions;
     private visionCache = new VisionCache();
     private metrics = new PerformanceMetrics();
-    
+
     // Para detectar estados estancados
     private lastSnapshotHash: string = '';
     private stuckCounter: number = 0;
     private readonly MAX_STUCK_COUNT = 3;
+
+    // Token storage for payment continuation
+    private static tokenStore: Map<string, { url: string; timestamp: number; data: any }> = new Map();
+
+    /**
+     * Generate a unique token for payment continuation
+     */
+    private generatePaymentToken(): string {
+        const timestamp = Date.now().toString(36);
+        const random = Math.random().toString(36).substring(2, 10);
+        return `pay_${timestamp}_${random}`;
+    }
+
+    /**
+     * Store token data for later retrieval
+     */
+    private storeTokenData(token: string, url: string, data: any): void {
+        WebAgent.tokenStore.set(token, {
+            url,
+            timestamp: Date.now(),
+            data
+        });
+
+        // Clean old tokens (older than 1 hour)
+        const oneHourAgo = Date.now() - (60 * 60 * 1000);
+        for (const [key, value] of WebAgent.tokenStore.entries()) {
+            if (value.timestamp < oneHourAgo) {
+                WebAgent.tokenStore.delete(key);
+            }
+        }
+    }
+
+    /**
+     * Get stored token data
+     */
+    static getTokenData(token: string): { url: string; timestamp: number; data: any } | undefined {
+        return WebAgent.tokenStore.get(token);
+    }
+
+    /**
+     * Detect if current page is a payment/checkout page
+     */
+    private detectPaymentPage(url: string, elements: { role: string; name: string }[]): {
+        isPaymentPage: boolean;
+        reservationInfo: {
+            date?: string;
+            time?: string;
+            product?: string;
+            price?: string;
+        };
+    } {
+        const urlLower = url.toLowerCase();
+        const elementNames = elements.map(e => (e.name || '').toLowerCase());
+        const elementNamesJoined = elementNames.join(' ');
+
+        // Check URL patterns for payment/checkout pages
+        const paymentUrlPatterns = [
+            'make-booking',
+            'checkout',
+            'payment',
+            'pago',
+            'confirmar',
+            'confirm',
+            'cart',
+            'carrito'
+        ];
+
+        const isPaymentUrl = paymentUrlPatterns.some(pattern => urlLower.includes(pattern));
+
+        // Check for payment-related elements
+        const paymentElementPatterns = [
+            'procesar pago',
+            'procesar',
+            'pagar',
+            'confirmar reserva',
+            'confirmar compra',
+            'completar pedido',
+            'finalizar',
+            'realizar pago',
+            'elegir producto'
+        ];
+
+        const hasPaymentElements = paymentElementPatterns.some(pattern =>
+            elementNamesJoined.includes(pattern)
+        );
+
+        // Extract reservation info from elements
+        const reservationInfo: {
+            date?: string;
+            time?: string;
+            product?: string;
+            price?: string;
+        } = {};
+
+        // Look for date/time in element names (format: DD/MM/YYYY HH:MMam)
+        for (const name of elementNames) {
+            // Match date pattern like "03/02/2026"
+            const dateMatch = name.match(/(\d{2}\/\d{2}\/\d{4})/);
+            if (dateMatch) {
+                reservationInfo.date = dateMatch[1];
+            }
+
+            // Match time pattern like "6:20am" or "10:00am"
+            const timeMatch = name.match(/(\d{1,2}:\d{2}\s*(?:am|pm))/i);
+            if (timeMatch) {
+                reservationInfo.time = timeMatch[1];
+            }
+
+            // Match price pattern like "$50.00" or "50.00"
+            const priceMatch = name.match(/\$?\s*(\d+(?:\.\d{2})?)/);
+            if (priceMatch && name.includes('$')) {
+                reservationInfo.price = `$${priceMatch[1]}`;
+            }
+        }
+
+        // Also try to extract from URL (e.g., /make-booking/620am/03022026)
+        const urlTimeMatch = url.match(/\/(\d{1,4})(am|pm)\//i);
+        if (urlTimeMatch && !reservationInfo.time) {
+            const timeStr = urlTimeMatch[1];
+            const period = urlTimeMatch[2];
+            if (timeStr.length <= 2) {
+                reservationInfo.time = `${timeStr}:00${period}`;
+            } else if (timeStr.length === 3) {
+                reservationInfo.time = `${timeStr[0]}:${timeStr.slice(1)}${period}`;
+            } else if (timeStr.length === 4) {
+                reservationInfo.time = `${timeStr.slice(0, 2)}:${timeStr.slice(2)}${period}`;
+            }
+        }
+
+        const urlDateMatch = url.match(/\/(\d{8})(?:\/|$)/);
+        if (urlDateMatch && !reservationInfo.date) {
+            const dateStr = urlDateMatch[1];
+            reservationInfo.date = `${dateStr.slice(0, 2)}/${dateStr.slice(2, 4)}/${dateStr.slice(4)}`;
+        }
+
+        return {
+            isPaymentPage: isPaymentUrl || hasPaymentElements,
+            reservationInfo
+        };
+    }
 
     constructor(options: AgentOptions) {
         this.options = options;
@@ -88,7 +228,7 @@ export class WebAgent {
             let detail = '';
             if (action.ref) detail = `element [${action.ref}]`;
             if (action.value) detail += detail ? ` with value "${action.value}"` : `"${action.value}"`;
-            
+
             actionsPerformed.push({
                 action: action.action,
                 detail: detail || '-',
@@ -102,7 +242,7 @@ export class WebAgent {
         actionsSummary.push(`   Estado: ${success ? '✅ COMPLETADO' : '❌ INCOMPLETO'}`);
         actionsSummary.push(`   Total de acciones: ${actions.length}`);
         actionsSummary.push(`   URL final: ${finalUrl}`);
-        
+
         if (summary) {
             actionsSummary.push(`   Resultado: ${summary}`);
         }
@@ -112,7 +252,7 @@ export class WebAgent {
         for (const a of actions) {
             actionCounts[a.action] = (actionCounts[a.action] || 0) + 1;
         }
-        
+
         // Action names in Spanish
         const actionNamesES: Record<string, string> = {
             'click': 'clic',
@@ -125,7 +265,7 @@ export class WebAgent {
             'extract': 'extraer',
             'download': 'descargar'
         };
-        
+
         actionsSummary.push(`   Desglose de acciones:`);
         for (const [action, count] of Object.entries(actionCounts)) {
             const actionES = actionNamesES[action] || action;
@@ -147,11 +287,11 @@ export class WebAgent {
         console.log('================================================================================');
         console.log('                    DATOS ESTRUCTURADOS EXTRAIDOS                              ');
         console.log('================================================================================');
-        
+
         // Original message
         console.log(`  MENSAJE ORIGINAL: "${data.originalMessage}"`);
         console.log('');
-        
+
         // Action type
         const actionLabels: Record<string, string> = {
             'reservation': 'RESERVACION',
@@ -163,7 +303,7 @@ export class WebAgent {
         };
         console.log(`  TIPO DE ACCION: ${actionLabels[data.actionType] || data.actionType}`);
         console.log('');
-        
+
         // Date information
         console.log('  --- FECHA ---');
         if (data.date.parsed) {
@@ -182,7 +322,7 @@ export class WebAgent {
             console.log('     No se especifico fecha');
         }
         console.log('');
-        
+
         // Time information
         console.log('  --- HORA ---');
         if (data.time.hour !== null) {
@@ -200,7 +340,7 @@ export class WebAgent {
             console.log('     No se especifico hora');
         }
         console.log('');
-        
+
         // Item information
         console.log('  --- PRODUCTO/SERVICIO ---');
         if (data.item.name || data.item.quantity) {
@@ -217,7 +357,7 @@ export class WebAgent {
             console.log('     No se especifico producto');
         }
         console.log('');
-        
+
         // Credentials
         if (data.credentials.email || data.credentials.username) {
             console.log('  --- CREDENCIALES ---');
@@ -229,7 +369,7 @@ export class WebAgent {
             }
             console.log(`     Password: ${data.credentials.hasPassword ? 'SI' : 'NO'}`);
         }
-        
+
         console.log('================================================================================');
         console.log('');
     }
@@ -357,60 +497,177 @@ export class WebAgent {
                     // TEXT ONLY MODE (Legacy)
                     console.log(`   📸 Taking snapshot...`);
                     let snapshot = await this.browser.takeSnapshot();
-                    
+
                     // If very few elements, try dismissing overlays and retake
                     if (snapshot.elements.length <= 5) {
                         console.log(`   ⚠️ Only ${snapshot.elements.length} elements - trying to dismiss overlays...`);
-                        await this.browser.dismissOverlays().catch(() => {});
+                        await this.browser.dismissOverlays().catch(() => { });
                         await new Promise(r => setTimeout(r, 800));
                         snapshot = await this.browser.takeSnapshot();
                     }
-                    
+
                     console.log(`   elements: ${snapshot.elements.length}`);
-                    
+
+                    // ========== DETECCIÓN DE PÁGINA DE PAGO/DETALLE ==========
+                    const currentUrl = this.browser.getUrl();
+                    const paymentDetection = this.detectPaymentPage(
+                        currentUrl,
+                        snapshot.elements.map(e => ({ role: e.role, name: e.name }))
+                    );
+
+                    // Solo detener para RESERVACIONES/COMPRAS, no para búsquedas generales
+                    const isReservationTask = structuredData.actionType === 'reservation' ||
+                        structuredData.actionType === 'purchase';
+
+                    if (paymentDetection.isPaymentPage && isReservationTask) {
+                        console.log(`\n💳 ═══════════════════════════════════════════════════════════`);
+                        console.log(`   🛑 PÁGINA DE DETALLE/PAGO DETECTADA - DETENIENDO (RESERVACIÓN)`);
+                        console.log(`   ═══════════════════════════════════════════════════════════`);
+
+                        // Capture cookies for session persistence
+                        const cookies = await this.browser.getCookies();
+                        console.log(`   🍪 Capturadas ${cookies.length} cookies para persistencia de sesión`);
+
+                        // Generate token and store session info
+                        const token = this.generatePaymentToken();
+                        const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+                        // Store token data
+                        this.storeTokenData(token, currentUrl, {
+                            instruction: input.instruction,
+                            credentials: input.credentials ? { email: input.credentials.email } : undefined,
+                            reservationInfo: paymentDetection.reservationInfo
+                        });
+
+                        // Build reservation summary
+                        const reservationSummary = {
+                            date: paymentDetection.reservationInfo.date || 'No detectada',
+                            time: paymentDetection.reservationInfo.time || 'No detectada',
+                            product: paymentDetection.reservationInfo.product,
+                            price: paymentDetection.reservationInfo.price,
+                            additionalInfo: [] as string[]
+                        };
+
+                        // Add visible info from elements
+                        snapshot.elements.forEach(el => {
+                            const name = el.name.toLowerCase();
+                            if (name.includes('producto') || name.includes('green fee') || name.includes('carrito')) {
+                                reservationSummary.additionalInfo?.push(el.name);
+                            }
+                        });
+
+                        console.log(`\n   📋 RESUMEN DE RESERVA:`);
+                        console.log(`      📅 Fecha: ${reservationSummary.date}`);
+                        console.log(`      ⏰ Hora: ${reservationSummary.time}`);
+                        if (reservationSummary.price) {
+                            console.log(`      💰 Precio: ${reservationSummary.price}`);
+                        }
+                        console.log(`\n   🔗 URL de continuación: ${currentUrl}`);
+                        console.log(`   🎫 Token: ${token}`);
+                        console.log(`   ⏱️ Expira: ${expiresAt.toISOString()}`);
+                        console.log(`\n   ═══════════════════════════════════════════════════════════`);
+
+                        // Generate actions summary
+                        const { actionsSummary, pagesVisited, actionsPerformed } = this.generateActionsSummary(
+                            previousActions,
+                            currentUrl,
+                            true,
+                            'Proceso detenido en página de pago - esperando confirmación del usuario'
+                        );
+
+                        console.log('\n' + actionsSummary.join('\n'));
+
+                        // Stop recording
+                        if (this.recorder) {
+                            this.recorder.stopRecording(true, 'Detenido en página de pago');
+                        }
+
+                        // Build human-readable message
+                        const message = `🛑 PROCESO PAUSADO EN PÁGINA DE PAGO\n\n` +
+                            `📋 Resumen de la reserva:\n` +
+                            `   • Fecha: ${reservationSummary.date}\n` +
+                            `   • Hora: ${reservationSummary.time}\n` +
+                            `${reservationSummary.price ? `   • Precio: ${reservationSummary.price}\n` : ''}` +
+                            `\n🔗 Para continuar con el pago:\n` +
+                            `   URL: ${currentUrl}\n` +
+                            `   Token: ${token}\n` +
+                            `\n⚠️ El token expira en 1 hora (${expiresAt.toLocaleTimeString('es-ES')})`;
+
+                        return {
+                            success: true,
+                            summary: 'Reserva preparada - esperando confirmación de pago',
+                            steps,
+                            data: extractedData,
+                            downloadedFiles,
+                            screenshots,
+                            flowId: this.recorder?.getCurrentFlowId() || undefined,
+                            duration: Date.now() - startTime,
+                            executionSummary: {
+                                totalActions: previousActions.length,
+                                finalUrl: currentUrl,
+                                pagesVisited,
+                                actionsPerformed,
+                                actionsSummaryText: actionsSummary.join('\n')
+                            },
+                            paymentPending: {
+                                stopped: true,
+                                continuationUrl: `${currentUrl}?token=${token}`,
+                                token,
+                                directUrl: currentUrl,
+                                reservationSummary,
+                                message,
+                                expiresAt: expiresAt.toISOString(),
+                                cookies
+                            }
+                        };
+                    } else if (paymentDetection.isPaymentPage && !isReservationTask) {
+                        // Para búsquedas/general, no detenerse, continuar extrayendo información
+                        console.log(`   ℹ️ Página de pago detectada pero es ${structuredData.actionType.toUpperCase()} - continuando extracción`);
+                    }
+
                     // ========== DETECCIÓN DE ESTADO ESTANCADO ==========
                     // Crear hash simple del snapshot para detectar páginas sin cambios
                     const currentHash = snapshot.elements.map(e => `${e.ref}:${e.name}`).join('|');
-                    
+
                     if (currentHash === this.lastSnapshotHash) {
                         this.stuckCounter++;
                         console.log(`   ⚠️ Página sin cambios detectada (${this.stuckCounter}/${this.MAX_STUCK_COUNT})`);
-                        
+
                         if (this.stuckCounter >= this.MAX_STUCK_COUNT) {
                             console.log(`   🔄 ESTADO ESTANCADO DETECTADO - Intentando recuperación...`);
-                            
+
                             // Estrategia 1: Verificar si hay un modal/popup visible
                             const hasModal = await this.browser.detectPopupOrModal();
                             if (hasModal) {
                                 console.log(`   🔲 Modal detectado - esperando interacción...`);
                                 await new Promise(r => setTimeout(r, 1500));
                             }
-                            
+
                             // Estrategia 2: Esperar más tiempo para contenido dinámico
                             console.log(`   ⏳ Esperando contenido dinámico (2s)...`);
                             await new Promise(r => setTimeout(r, 2000));
-                            
+
                             // Estrategia 3: Buscar en iframes si hay contenido de reservas
                             const foundInIframe = await this.browser.findAndClickInIframes('reserv');
                             if (foundInIframe) {
                                 console.log(`   ✓ Encontrado contenido en iframe`);
                                 await new Promise(r => setTimeout(r, 1500));
                             }
-                            
+
                             // Estrategia 4: Intentar scroll para revelar contenido
                             console.log(`   📜 Scrolling para revelar contenido...`);
                             await this.browser.scroll('down');
                             await new Promise(r => setTimeout(r, 1000));
-                            
+
                             // Estrategia 5: Buscar la URL de reservas en los enlaces de la página
                             const allLinks = await this.browser.getAllLinks();
-                            const reservationLink = allLinks.find(link => 
+                            const reservationLink = allLinks.find(link =>
                                 link.text.toLowerCase().includes('reserv') ||
                                 link.href.toLowerCase().includes('reserv') ||
                                 link.href.toLowerCase().includes('booking') ||
                                 link.href.toLowerCase().includes('tee')
                             );
-                            
+
                             if (reservationLink && reservationLink.href.startsWith('http')) {
                                 console.log(`   🔗 Enlace de reservas encontrado: ${reservationLink.href}`);
                                 try {
@@ -425,7 +682,7 @@ export class WebAgent {
                                     console.log(`   ⚠️ Error navegando a enlace: ${e}`);
                                 }
                             }
-                            
+
                             // Estrategia 6: DESHABILITADA - Navegar a URLs alternativas rompía el estado
                             // En su lugar, intentamos refrescar la página actual
                             try {
@@ -435,7 +692,7 @@ export class WebAgent {
                             } catch (reloadError) {
                                 console.log(`   ⚠️ Error al refrescar: ${reloadError}`);
                             }
-                            
+
                             // Re-tomar snapshot después de intentos de recuperación
                             try {
                                 if (this.browser) {
@@ -451,7 +708,7 @@ export class WebAgent {
                         this.stuckCounter = 0; // Reset si la página cambió
                     }
                     this.lastSnapshotHash = currentHash;
-                    
+
                     // Show elements for debugging
                     // Always show when <= 15, or when between 15-50 (likely time slots after date selection)
                     const showElements = snapshot.elements.length > 0 && snapshot.elements.length <= 50;
@@ -466,7 +723,7 @@ export class WebAgent {
                             console.log(`      ... and ${snapshot.elements.length - 30} more elements`);
                         }
                     }
-                    
+
                     console.log(`   🤖 Thinking...`);
 
                     response = await this.openai.planNextAction({
@@ -497,9 +754,9 @@ export class WebAgent {
                     // Generate actions summary
                     const finalUrl = this.browser?.getUrl() || input.url;
                     const { actionsSummary, pagesVisited, actionsPerformed } = this.generateActionsSummary(
-                        previousActions, 
-                        finalUrl, 
-                        true, 
+                        previousActions,
+                        finalUrl,
+                        true,
                         doneResponse.summary
                     );
 
@@ -533,7 +790,7 @@ export class WebAgent {
 
                 // Execute action
                 const action = response as PlannedAction;
-                
+
                 // Handle undefined or invalid action - convert to scroll
                 if (!action.action || (action.action as string) === 'undefined') {
                     console.log(`   ⚠️ Invalid action received (${action.action}), converting to scroll UP`);
@@ -541,32 +798,32 @@ export class WebAgent {
                     action.direction = 'up';
                     action.reason = action.reason || 'Auto-converted from invalid action - scrolling to find content';
                 }
-                
+
                 // Count recent scrolls and check if stuck at bottom
-                const recentScrollsDown = previousActions.slice(-6).filter(a => 
+                const recentScrollsDown = previousActions.slice(-6).filter(a =>
                     a.action === 'scroll' && (a.direction === 'down' || !a.direction)
                 ).length;
-                
-                const recentScrollsUp = previousActions.slice(-6).filter(a => 
+
+                const recentScrollsUp = previousActions.slice(-6).filter(a =>
                     a.action === 'scroll' && a.direction === 'up'
                 ).length;
-                
+
                 const totalRecentScrolls = recentScrollsDown + recentScrollsUp;
-                
+
                 // If too many scrolls in any direction without progress, try clicking date field
                 if (action.action === 'scroll' && totalRecentScrolls >= 5) {
                     console.log(`   ⚠️ Stuck scrolling (${totalRecentScrolls} recent scrolls without progress)`);
-                    
+
                     // Try to find a date input field to click instead
                     const snapshot = await this.browser?.takeSnapshot();
                     if (snapshot) {
                         const dateInput = snapshot.elements.find(e => {
                             const name = (e.name || '').toLowerCase();
                             const role = (e.role || '').toLowerCase();
-                            return (role === 'input' || role === 'textbox') && 
-                                   (name.includes('fecha') || name.includes('date') || name.includes('seleccionar'));
+                            return (role === 'input' || role === 'textbox') &&
+                                (name.includes('fecha') || name.includes('date') || name.includes('seleccionar'));
                         });
-                        
+
                         if (dateInput) {
                             console.log(`   🎯 Found date input [${dateInput.ref}] - clicking to open calendar`);
                             action.action = 'click';
@@ -583,16 +840,16 @@ export class WebAgent {
                         }
                     }
                 }
-                
+
                 // If many consecutive scroll downs, force scroll UP
-                if (action.action === 'scroll' && (action.direction === 'down' || !action.direction) && 
+                if (action.action === 'scroll' && (action.direction === 'down' || !action.direction) &&
                     recentScrollsDown >= 4) {
                     console.log(`   ⚠️ Stuck scrolling down (${recentScrollsDown} consecutive scrolls)`);
                     console.log(`   🔄 Forcing scroll UP to find content`);
                     action.direction = 'up';
                     action.reason = 'Auto-converted to scroll UP - stuck scrolling down';
                 }
-                
+
                 // Check for excessive login attempts before executing
                 const recentLoginCount = previousActions.slice(-5).filter(a => a.action === 'login').length;
                 if (action.action === 'login' && recentLoginCount >= 3) {
@@ -607,17 +864,17 @@ export class WebAgent {
                 if (action.action === 'click' && action.ref) {
                     // Check if this looks like a time slot click (based on value pattern)
                     const isTimeSlotClick = action.value && /^\d{1,2}:\d{2}\s*(am|pm)?$/i.test(action.value.trim());
-                    
+
                     // Check if this is a navigation link (Reservas, Reservar, etc.)
-                    const isNavLink = action.reason?.toLowerCase().includes('reserv') || 
-                                      action.reason?.toLowerCase().includes('naveg') ||
-                                      action.reason?.toLowerCase().includes('acceder');
-                    
+                    const isNavLink = action.reason?.toLowerCase().includes('reserv') ||
+                        action.reason?.toLowerCase().includes('naveg') ||
+                        action.reason?.toLowerCase().includes('acceder');
+
                     // Count total clicks on this element (not just consecutive)
                     const totalClicksOnElement = previousActions.filter(
                         a => a.action === 'click' && a.ref === action.ref
                     ).length;
-                    
+
                     // Only count CONSECUTIVE same clicks (not total)
                     let consecutiveClicks = 0;
                     for (let i = previousActions.length - 1; i >= 0; i--) {
@@ -628,7 +885,7 @@ export class WebAgent {
                             break; // Different action, stop counting
                         }
                     }
-                    
+
                     // For navigation links, be VERY restrictive - only 1-2 attempts
                     // For time slots, allow 2 attempts
                     // For other elements, allow 3-4 attempts
@@ -638,36 +895,36 @@ export class WebAgent {
                     } else if (isTimeSlotClick) {
                         maxClicksAllowed = 2;
                     }
-                    
+
                     // Block if too many clicks (consecutive OR total)
                     const shouldBlock = consecutiveClicks >= maxClicksAllowed || totalClicksOnElement >= maxClicksAllowed;
-                    
+
                     if (shouldBlock) {
                         console.log(`   ⚠️ Blocking repetitive click on [${action.ref}] - ${consecutiveClicks} consecutive, ${totalClicksOnElement} total`);
-                        
+
                         if (isTimeSlotClick) {
                             // For time slots, the click probably worked but didn't navigate
                             // Wait for any UI updates and then continue to see what changed
                             console.log(`   🕐 Time slot already clicked - waiting for page response...`);
                             await new Promise(r => setTimeout(r, 1500));
-                            
+
                             // Take a fresh snapshot and let the AI decide next action
                             // Instead of forcing scroll, let the AI see what's on screen now
                             continue;
                         }
-                        
+
                         if (isNavLink && totalClicksOnElement >= 2) {
                             // Navigation link clicked multiple times without effect
                             // Try waiting longer for page load or dynamic content
                             console.log(`   🔄 Navigation link sin efecto - esperando contenido dinámico...`);
                             await new Promise(r => setTimeout(r, 3000));
-                            
+
                             // Try pressing Enter on the link
                             try {
                                 await this.browser?.press('Enter');
                                 await new Promise(r => setTimeout(r, 1000));
-                            } catch {}
-                            
+                            } catch { }
+
                             // If still no change, try scrolling to reveal hidden content
                             console.log(`   📜 Scrolling para revelar contenido oculto...`);
                             await this.browser?.scroll('down');
@@ -675,9 +932,9 @@ export class WebAgent {
                             await this.browser?.scroll('up');
                             continue;
                         }
-                        
+
                         console.log(`   🔄 Trying to dismiss overlays and scroll...`);
-                        await this.browser?.dismissOverlays().catch(() => {});
+                        await this.browser?.dismissOverlays().catch(() => { });
                         await new Promise(r => setTimeout(r, 1000));
                         action.action = 'scroll';
                         action.direction = 'down';
@@ -692,7 +949,81 @@ export class WebAgent {
                 // Save URL before action to detect navigation
                 const urlBefore = this.browser.getUrl();
 
-                const result = await executor.execute(action, undefined); // Snapshot not strictly needed for executor anymore due to fast-finder
+                let result;
+                try {
+                    result = await executor.execute(action, undefined); // Snapshot not strictly needed for executor anymore due to fast-finder
+                } catch (execError: any) {
+                    // Check if this is a TIME_SLOT_UNAVAILABLE error
+                    if (execError.message?.startsWith('TIME_SLOT_UNAVAILABLE:') && execError.timeSlotResult) {
+                        const slotResult = execError.timeSlotResult;
+                        const slotName = execError.message.split(':')[1];
+
+                        console.log(`\n⏰ ═══════════════════════════════════════════════════════════`);
+                        console.log(`   🚫 HORARIO NO DISPONIBLE: ${slotName}`);
+                        console.log(`   ═══════════════════════════════════════════════════════════`);
+                        console.log(`   📋 Razón: El horario ${slotName} ya está reservado`);
+
+                        if (slotResult.nearbyAvailable && slotResult.nearbyAvailable.length > 0) {
+                            console.log(`\n   🕐 HORARIOS DISPONIBLES MÁS CERCANOS:`);
+                            slotResult.nearbyAvailable.slice(0, 10).forEach((slot: string, idx: number) => {
+                                console.log(`      ${idx + 1}. ${slot}`);
+                            });
+                        }
+
+                        console.log(`\n   ═══════════════════════════════════════════════════════════`);
+
+                        // Generate actions summary
+                        const finalUrl = this.browser?.getUrl() || input.url;
+                        const { actionsSummary, pagesVisited, actionsPerformed } = this.generateActionsSummary(
+                            previousActions,
+                            finalUrl,
+                            false,
+                            `Horario ${slotName} no disponible`
+                        );
+
+                        console.log('\n' + actionsSummary.join('\n'));
+
+                        // Stop recording
+                        if (this.recorder) {
+                            this.recorder.stopRecording(false, `Horario ${slotName} no disponible`);
+                        }
+
+                        // Build human-readable message
+                        const alternativesText = slotResult.nearbyAvailable && slotResult.nearbyAvailable.length > 0
+                            ? `\n\n🕐 Horarios disponibles más cercanos:\n${slotResult.nearbyAvailable.slice(0, 5).map((s: string, i: number) => `   ${i + 1}. ${s}`).join('\n')}`
+                            : '\n\n⚠️ No se encontraron horarios alternativos cercanos.';
+
+                        return {
+                            success: false,
+                            summary: `El horario solicitado (${slotName}) no está disponible - ya está reservado`,
+                            steps,
+                            data: extractedData,
+                            downloadedFiles,
+                            screenshots,
+                            flowId: this.recorder?.getCurrentFlowId() || undefined,
+                            duration: Date.now() - startTime,
+                            error: `TIME_SLOT_UNAVAILABLE:${slotName}`,
+                            executionSummary: {
+                                totalActions: previousActions.length,
+                                finalUrl,
+                                pagesVisited,
+                                actionsPerformed,
+                                actionsSummaryText: actionsSummary.join('\n')
+                            },
+                            // Include slot unavailability info
+                            slotUnavailable: {
+                                requestedSlot: slotName,
+                                reason: slotResult.reason,
+                                availableAlternatives: slotResult.nearbyAvailable || [],
+                                message: `🚫 HORARIO NO DISPONIBLE\n\nEl horario solicitado ${slotName} ya está reservado.${alternativesText}\n\n💡 Por favor, intenta con otro horario.`
+                            }
+                        };
+                    }
+
+                    // Re-throw other errors
+                    throw execError;
+                }
+
                 steps.push(result);
                 previousActions.push(action);
 
@@ -707,15 +1038,15 @@ export class WebAgent {
                     // Continue anyway, AI might recover
                 } else {
                     console.log(`   ✓ Success`);
-                    
+
                     // Si es un clic en enlace de navegación, esperar más tiempo
                     // para contenido dinámico (SPAs, AJAX, etc.)
-                    const isNavAction = action.action === 'click' && 
+                    const isNavAction = action.action === 'click' &&
                         (action.reason?.toLowerCase().includes('reserv') ||
-                         action.reason?.toLowerCase().includes('naveg') ||
-                         action.reason?.toLowerCase().includes('página') ||
-                         action.reason?.toLowerCase().includes('acceder'));
-                    
+                            action.reason?.toLowerCase().includes('naveg') ||
+                            action.reason?.toLowerCase().includes('página') ||
+                            action.reason?.toLowerCase().includes('acceder'));
+
                     if (isNavAction) {
                         console.log(`   ⏳ Esperando contenido dinámico después de navegación...`);
                         await new Promise(r => setTimeout(r, 2000));
@@ -756,9 +1087,9 @@ export class WebAgent {
             // Generate actions summary
             const finalUrl = this.browser?.getUrl() || input.url;
             const { actionsSummary, pagesVisited, actionsPerformed } = this.generateActionsSummary(
-                previousActions, 
-                finalUrl, 
-                false, 
+                previousActions,
+                finalUrl,
+                false,
                 `Reached maximum of ${maxSteps} steps`
             );
 
@@ -795,9 +1126,9 @@ export class WebAgent {
             // Generate actions summary
             const finalUrl = this.browser?.getUrl() || input.url;
             const { actionsSummary, pagesVisited, actionsPerformed } = this.generateActionsSummary(
-                previousActions, 
-                finalUrl, 
-                false, 
+                previousActions,
+                finalUrl,
+                false,
                 `Error: ${errorMessage}`
             );
 

@@ -727,6 +727,14 @@ const SNAPSHOT_SCRIPT = `
 })()
 `;
 
+// Type for time slot click results
+export interface TimeSlotResult {
+    available: boolean;
+    slotName: string;
+    reason: string;
+    nearbyAvailable: string[];
+}
+
 export class BrowserClient {
     private browser: Browser | null = null;
     private context: BrowserContext | null = null;
@@ -735,6 +743,9 @@ export class BrowserClient {
     private downloadsDir: string;
     private fastFinder = new FastElementFinder();
     private enhancedSnapshot = new EnhancedSnapshot();
+
+    // Store last time slot click result for agent to check
+    public lastTimeSlotResult: TimeSlotResult | null = null;
 
     constructor(config: BrowserConfig, downloadsDir: string) {
         this.config = config;
@@ -791,6 +802,23 @@ export class BrowserClient {
     async getTitle(): Promise<string> {
         if (!this.page) throw new Error('Browser not launched');
         return this.page.title();
+    }
+
+    /**
+     * Get all cookies from the browser context for session persistence
+     */
+    async getCookies(): Promise<{
+        name: string;
+        value: string;
+        domain: string;
+        path: string;
+        expires: number;
+        httpOnly: boolean;
+        secure: boolean;
+        sameSite: 'Lax' | 'Strict' | 'None';
+    }[]> {
+        if (!this.context) throw new Error('Browser not launched');
+        return await this.context.cookies();
     }
 
     /**
@@ -1193,7 +1221,17 @@ export class BrowserClient {
 
         if (isTimeSlot) {
             console.log(`   🕐 Detected time slot: "${element.name}" - using specialized click...`);
-            await this.clickTimeSlot(element, locator);
+            const result = await this.clickTimeSlot(element, locator);
+
+            // Store the result for the agent to check
+            this.lastTimeSlotResult = result;
+
+            if (!result.available) {
+                // Throw a special error that can be caught by the agent
+                const error = new Error(`TIME_SLOT_UNAVAILABLE:${element.name}`);
+                (error as any).timeSlotResult = result;
+                throw error;
+            }
             return;
         }
 
@@ -1335,7 +1373,7 @@ export class BrowserClient {
      * Time slots don't navigate - they just change selection state
      * Supports Angular, Vue, React and other frameworks
      */
-    private async clickTimeSlot(element: SnapshotElement, locator: any): Promise<void> {
+    private async clickTimeSlot(element: SnapshotElement, locator: any): Promise<TimeSlotResult> {
         if (!this.page) throw new Error('Browser not launched');
 
         const selector = element.selector || '';
@@ -1390,11 +1428,24 @@ export class BrowserClient {
                 });
             }
 
-            // Don't try to click unavailable slots - just return
-            return;
+            // Return result indicating slot is not available
+            return {
+                available: false,
+                slotName: name,
+                reason: slotStatus.reason,
+                nearbyAvailable: nearbySlots
+            };
         } else if (slotStatus.available === true) {
             console.log(`   ✅ Time slot appears available: ${slotStatus.reason}`);
         }
+
+        // Define success result to return when click works
+        const successResult: TimeSlotResult = {
+            available: true,
+            slotName: name,
+            reason: 'slot clicked successfully',
+            nearbyAvailable: []
+        };
 
         // Get initial state to detect changes (including CSS classes for selection)
         const initialState = await this.page.evaluate((timeName: string) => {
@@ -1458,7 +1509,7 @@ export class BrowserClient {
         };
 
         if (await checkStateChanged('direct click')) {
-            return;
+            return successResult;
         }
 
         // Strategy 1.5: Find element with data-* attribute containing the time value
@@ -1487,7 +1538,7 @@ export class BrowserClient {
                         await this.page.waitForTimeout(500);
 
                         if (await checkStateChanged('data-attribute click')) {
-                            return;
+                            return successResult;
                         }
                     }
                 }
@@ -1520,7 +1571,7 @@ export class BrowserClient {
                 await this.page.waitForTimeout(500);
 
                 if (await checkStateChanged('generic data-attr click')) {
-                    return;
+                    return successResult;
                 }
             }
         } catch (e) {
@@ -1545,7 +1596,7 @@ export class BrowserClient {
                     await this.page.waitForTimeout(500);
 
                     if (await checkStateChanged(`${pattern}-class click`)) {
-                        return;
+                        return successResult;
                     }
                 }
             }
@@ -1560,7 +1611,7 @@ export class BrowserClient {
             await this.page.waitForTimeout(300);
 
             if (await checkStateChanged('double click')) {
-                return;
+                return successResult;
             }
         } catch (e) {
             // Double click failed
@@ -1803,7 +1854,7 @@ export class BrowserClient {
                 await this.page.waitForTimeout(500);
 
                 if (await checkStateChanged('clickable ancestor click')) {
-                    return;
+                    return successResult;
                 }
             }
         } catch (e) {
@@ -1989,6 +2040,14 @@ export class BrowserClient {
                 console.log(`   🔍 DOM structure: ${debugInfo}`);
             } catch { }
         }
+
+        // Return success result (we tried all strategies)
+        return {
+            available: true,
+            slotName: name,
+            reason: stateChanged ? 'slot clicked successfully' : 'click attempted but page unchanged',
+            nearbyAvailable: []
+        };
     }
 
     /**
@@ -2432,6 +2491,209 @@ export class BrowserClient {
         } catch {
             return [];
         }
+    }
+
+    /**
+     * Find and click a time slot directly by its time value (e.g., "10:00am")
+     * Uses JavaScript to scroll to the element and click it efficiently
+     * Returns TimeSlotResult with availability info
+     */
+    async findAndClickTimeSlot(targetTime: string): Promise<TimeSlotResult> {
+        if (!this.page) throw new Error('Browser not launched');
+
+        console.log(`   🎯 Direct time slot search for: "${targetTime}"`);
+
+        // Normalize the target time for matching
+        const normalizedTarget = targetTime.toLowerCase().replace(/\s+/g, '').trim();
+
+        // Use JavaScript to find, scroll to, and get info about the time slot
+        const result = await this.page.evaluate((target: string) => {
+            const allElements = Array.from(document.querySelectorAll('span, div, td, a, button'));
+
+            // Find elements with matching time text
+            for (const el of allElements) {
+                const text = (el.textContent || '').toLowerCase().replace(/\s+/g, '').trim();
+                if (text === target || text === target.replace('am', '') || text === target.replace('pm', '')) {
+                    // Check if this slot is available
+                    let parent = el.parentElement;
+                    let isAvailable = true;
+                    let containerClasses = '';
+
+                    for (let i = 0; i < 8 && parent; i++) {
+                        const classes = (parent.className || '').toLowerCase();
+                        containerClasses += ' ' + classes;
+
+                        if (classes.includes('filled') || classes.includes('booked') ||
+                            classes.includes('reserved') || classes.includes('unavailable') ||
+                            classes.includes('disabled') || classes.includes('taken')) {
+                            isAvailable = false;
+                            break;
+                        }
+                        parent = parent.parentElement;
+                    }
+
+                    // Scroll the element into view
+                    (el as HTMLElement).scrollIntoView({ behavior: 'auto', block: 'center' });
+
+                    if (isAvailable) {
+                        // Click the element or its clickable parent
+                        let clickTarget: HTMLElement | null = el as HTMLElement;
+                        let current = el.parentElement;
+
+                        // Find the best clickable parent
+                        for (let i = 0; i < 5 && current; i++) {
+                            if (current.hasAttribute('data-tt') ||
+                                current.classList.contains('bookit') ||
+                                current.hasAttribute('onclick') ||
+                                current.tagName === 'A' ||
+                                current.tagName === 'BUTTON' ||
+                                window.getComputedStyle(current).cursor === 'pointer') {
+                                clickTarget = current as HTMLElement;
+                                break;
+                            }
+                            current = current.parentElement;
+                        }
+
+                        if (clickTarget) {
+                            clickTarget.click();
+                            return { found: true, available: true, clicked: true, classes: containerClasses };
+                        }
+                    }
+
+                    return { found: true, available: false, clicked: false, classes: containerClasses };
+                }
+            }
+
+            return { found: false, available: false, clicked: false, classes: '' };
+        }, normalizedTarget);
+
+        if (!result.found) {
+            console.log(`   ❌ Time slot "${targetTime}" not found on page`);
+
+            // Try scrolling down to find more time slots
+            const scrollResult = await this.scrollToFindTimeSlot(normalizedTarget);
+            if (scrollResult) {
+                return scrollResult;
+            }
+
+            return {
+                available: false,
+                slotName: targetTime,
+                reason: 'time slot not found on page',
+                nearbyAvailable: await this.findNearbyAvailableSlots(targetTime)
+            };
+        }
+
+        if (!result.available) {
+            console.log(`   ❌ Time slot "${targetTime}" is NOT available`);
+            console.log(`   📋 Container classes: ${result.classes.trim()}`);
+
+            const nearbySlots = await this.findNearbyAvailableSlots(targetTime);
+            if (nearbySlots.length > 0) {
+                console.log(`   🕐 Nearby available slots: ${nearbySlots.join(', ')}`);
+            }
+
+            return {
+                available: false,
+                slotName: targetTime,
+                reason: `slot has class indicating unavailable: ${result.classes.trim()}`,
+                nearbyAvailable: nearbySlots
+            };
+        }
+
+        console.log(`   ✅ Found and clicked time slot "${targetTime}"`);
+        this.lastTimeSlotResult = {
+            available: true,
+            slotName: targetTime,
+            reason: 'slot clicked successfully via direct search',
+            nearbyAvailable: []
+        };
+
+        return this.lastTimeSlotResult;
+    }
+
+    /**
+     * Scroll through the page to find a specific time slot
+     * Returns TimeSlotResult if found, null if not found after scrolling
+     */
+    private async scrollToFindTimeSlot(targetTime: string): Promise<TimeSlotResult | null> {
+        if (!this.page) return null;
+
+        const maxScrollAttempts = 10;
+        let lastHeight = 0;
+
+        for (let attempt = 0; attempt < maxScrollAttempts; attempt++) {
+            // Scroll down
+            await this.page.evaluate(() => {
+                window.scrollBy(0, 400);
+            });
+            await this.page.waitForTimeout(200);
+
+            // Check if we found the time slot now
+            const found = await this.page.evaluate((target: string) => {
+                const allElements = Array.from(document.querySelectorAll('span, div, td'));
+                for (const el of allElements) {
+                    const text = (el.textContent || '').toLowerCase().replace(/\s+/g, '').trim();
+                    if (text === target) {
+                        // Check availability
+                        let parent = el.parentElement;
+                        let isAvailable = true;
+
+                        for (let i = 0; i < 8 && parent; i++) {
+                            const classes = (parent.className || '').toLowerCase();
+                            if (classes.includes('filled') || classes.includes('booked') ||
+                                classes.includes('reserved') || classes.includes('unavailable')) {
+                                isAvailable = false;
+                                break;
+                            }
+                            parent = parent.parentElement;
+                        }
+
+                        // Scroll into view and click if available
+                        (el as HTMLElement).scrollIntoView({ behavior: 'auto', block: 'center' });
+
+                        if (isAvailable) {
+                            // Find clickable parent
+                            let clickTarget: HTMLElement | null = el as HTMLElement;
+                            let current = el.parentElement;
+                            for (let i = 0; i < 5 && current; i++) {
+                                if (current.hasAttribute('data-tt') ||
+                                    current.classList.contains('bookit') ||
+                                    current.hasAttribute('onclick')) {
+                                    clickTarget = current as HTMLElement;
+                                    break;
+                                }
+                                current = current.parentElement;
+                            }
+                            if (clickTarget) clickTarget.click();
+                        }
+
+                        return { found: true, available: isAvailable };
+                    }
+                }
+                return { found: false, available: false };
+            }, targetTime);
+
+            if (found.found) {
+                console.log(`   🔍 Found "${targetTime}" after ${attempt + 1} scroll(s)`);
+                return {
+                    available: found.available,
+                    slotName: targetTime,
+                    reason: found.available ? 'found after scrolling' : 'slot unavailable',
+                    nearbyAvailable: found.available ? [] : await this.findNearbyAvailableSlots(targetTime)
+                };
+            }
+
+            // Check if we've hit the bottom
+            const newHeight = await this.page.evaluate(() => document.body.scrollHeight);
+            if (newHeight === lastHeight) {
+                console.log(`   ⚠️ Reached end of scroll area without finding "${targetTime}"`);
+                break;
+            }
+            lastHeight = newHeight;
+        }
+
+        return null;
     }
 
     /**

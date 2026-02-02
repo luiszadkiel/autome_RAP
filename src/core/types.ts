@@ -84,6 +84,58 @@ export interface AgentResult {
         /** Human-readable summary text */
         actionsSummaryText: string;
     };
+    /** Payment/Checkout pending information - returned when agent reaches payment page */
+    paymentPending?: {
+        /** Whether the process was stopped at payment page */
+        stopped: boolean;
+        /** Continuation URL with token */
+        continuationUrl: string;
+        /** Unique token to resume the session */
+        token: string;
+        /** Direct URL to the payment page (without token) */
+        directUrl: string;
+        /** Reservation summary */
+        reservationSummary: {
+            /** Date of the reservation */
+            date: string;
+            /** Time of the reservation */
+            time: string;
+            /** Product/service being reserved */
+            product?: string;
+            /** Number of players/guests */
+            players?: number;
+            /** Price if visible */
+            price?: string;
+            /** Any additional details */
+            additionalInfo?: string[];
+        };
+        /** Human-readable message in Spanish */
+        message: string;
+        /** When the token expires */
+        expiresAt: string;
+        /** Browser cookies for authenticated session */
+        cookies?: {
+            name: string;
+            value: string;
+            domain: string;
+            path: string;
+            expires: number;
+            httpOnly: boolean;
+            secure: boolean;
+            sameSite: 'Lax' | 'Strict' | 'None';
+        }[];
+    };
+    /** Time slot unavailability information - returned when requested slot is not available */
+    slotUnavailable?: {
+        /** The time slot that was requested but not available */
+        requestedSlot: string;
+        /** Reason why the slot is not available */
+        reason: string;
+        /** List of available alternative time slots */
+        availableAlternatives: string[];
+        /** Human-readable message in Spanish */
+        message: string;
+    };
 }
 
 export interface StepResult {
@@ -113,13 +165,14 @@ export type ActionType =
     | 'goForward'
     | 'closeTab'
     | 'login'
+    | 'selectTimeSlot'
     | 'done';
 
 export interface PlannedAction {
     action: ActionType;
     /** Element reference (e1, e2, etc.) for click, type, select */
     ref?: string;
-    /** Value for type, navigate, select */
+    /** Value for type, navigate, select, selectTimeSlot */
     value?: string;
     /** What to wait for */
     waitFor?: string;
@@ -129,6 +182,8 @@ export interface PlannedAction {
     extractTarget?: string;
     /** Reasoning for this action */
     reason: string;
+    /** Result of action execution (e.g., for selectTimeSlot availability) */
+    result?: unknown;
 }
 
 export interface DoneResponse {
