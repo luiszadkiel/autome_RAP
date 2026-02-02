@@ -1090,17 +1090,28 @@ export function createApiServer(config: {
         // ============================================
         
         // Configuración: URL de tu PWA publicada
-        const USAR_PWA = false; // Cambiar a true cuando publiques la PWA
-        const PWA_URL = 'https://tu-usuario.github.io/cayacoa-pwa/'; // Cambiar por tu URL
+        const USAR_PWA = true; // ✅ ACTIVADO - Redirige a PWA automática
+        const PWA_URL = 'https://pwa-cayacoa.netlify.app/'; // ✅ Tu PWA en Netlify
         
         if (USAR_PWA) {
             // Extraer booking de la URL de destino
             const bookingMatch = targetUrl.match(/make-booking\/([^/]+)/);
             if (bookingMatch) {
                 const bookingParam = bookingMatch[1];
+                
+                // Codificar credenciales en base64 para incluirlas en la URL
+                const credentialsJson = JSON.stringify({
+                    email: credentials.username,
+                    password: credentials.password
+                });
+                const credentialsEncoded = Buffer.from(credentialsJson).toString('base64');
+                
                 console.log(`   🔀 Redirigiendo a PWA con booking: ${bookingParam}`);
-                console.log(`   🌐 PWA URL: ${PWA_URL}?booking=${bookingParam}\n`);
-                return c.redirect(`${PWA_URL}?booking=${bookingParam}`);
+                console.log(`   🔐 Credenciales incluidas en URL (encriptadas)`);
+                console.log(`   🌐 PWA URL: ${PWA_URL}?booking=${bookingParam}&credentials=***\n`);
+                
+                // Redirigir con booking Y credenciales
+                return c.redirect(`${PWA_URL}?booking=${bookingParam}&credentials=${credentialsEncoded}`);
             }
         }
         

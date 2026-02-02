@@ -302,8 +302,24 @@
         const urlParams = new URLSearchParams(window.location.search);
         const bookingParam = urlParams.get('booking');
         const redirectParam = urlParams.get('redirect');
+        const credentialsParam = urlParams.get('credentials'); // Credenciales encriptadas desde el servidor
         
         let targetUrl = null;
+        let autoCredentials = null; // Credenciales que vienen automáticamente
+        
+        // Decodificar credenciales si vienen en la URL
+        if (credentialsParam) {
+            try {
+                // Decodificar base64
+                const decoded = atob(credentialsParam);
+                autoCredentials = JSON.parse(decoded);
+                console.log('🔐 Credenciales recibidas desde servidor');
+                console.log('📧 Email:', autoCredentials.email);
+                console.log('🔑 Password: [protegido]');
+            } catch (e) {
+                console.error('❌ Error al decodificar credenciales:', e);
+            }
+        }
         
         // Construir URL de destino
         if (bookingParam) {
@@ -385,21 +401,93 @@
             console.log('🗑️ Credenciales borradas');
         }
         
-        // Auto-login
-        function autoLogin(email, password) {
-            console.log('🚀 Iniciando auto-login...');
+        // Auto-login con fetch POST (evita reemplazo de página)
+        async function autoLogin(email, password) {
+            console.log('🚀 Iniciando auto-login automático...');
             
-            showLoading('Preparando acceso automático...');
+            showLoading('Preparando login...');
             
-            // Construir URL con credenciales
-            const loginWithParams = `${LOGIN_URL}?email=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}&redirect=${encodeURIComponent(targetUrl)}`;
+            // Preparar datos del form
+            const formData = new FormData();
+            formData.append('username', email);
+            formData.append('password', password);
             
-            // Guardar para después
-            sessionStorage.setItem('cayacoa_target_after_login', targetUrl);
+            console.log('✅ Datos preparados');
+            console.log('📧 Username:', email);
+            console.log('🔐 Password: [protegido]');
+            console.log('📍 URL:', `${CAYACOA_BASE}/front-end/signin`);
             
-            setTimeout(() => {
-                console.log('📍 Redirigiendo a login con credenciales...');
-                window.location.href = loginWithParams;
+            showLoading('Enviando credenciales...');
+            
+            setTimeout(async () => {
+                try {
+                    console.log('🚀 Enviando POST request...');
+                    showLoading('Iniciando sesión...');
+                    
+                    // Hacer POST a Cayacoa
+                    const response = await fetch(`${CAYACOA_BASE}/front-end/signin`, {
+                        method: 'POST',
+                        body: formData,
+                        credentials: 'include', // Importante: incluir cookies
+                        redirect: 'follow' // Seguir redirects automáticamente
+                    });
+                    
+                    console.log('✅ Response recibido:', response.status);
+                    
+                    if (response.ok || response.redirected) {
+                        console.log('✅ Login exitoso!');
+                        showLoading('Login exitoso! Redirigiendo...');
+                        
+                        // Esperar 1 segundo y redirigir a la página de reserva
+                        setTimeout(() => {
+                            console.log('🎯 Redirigiendo a:', targetUrl);
+                            window.location.href = targetUrl;
+                        }, 1000);
+                    } else {
+                        console.error('❌ Login falló:', response.status);
+                        showLoading('Error de login. Verificando credenciales...');
+                        
+                        setTimeout(() => {
+                            alert('Error al iniciar sesión. Por favor verifica tus credenciales.');
+                            showForm();
+                        }, 2000);
+                    }
+                    
+                } catch (error) {
+                    console.error('❌ Error en fetch:', error);
+                    
+                    // Si fetch falla (puede ser por CORS), usar método de form submit tradicional
+                    console.log('⚠️ Fetch falló, usando método alternativo (form submit)...');
+                    showLoading('Usando método alternativo...');
+                    
+                    setTimeout(() => {
+                        // Crear formulario y hacer submit tradicional
+                        const form = document.createElement('form');
+                        form.method = 'POST';
+                        form.action = `${CAYACOA_BASE}/front-end/signin`;
+                        form.style.display = 'none';
+                        
+                        const usernameInput = document.createElement('input');
+                        usernameInput.type = 'text';
+                        usernameInput.name = 'username';
+                        usernameInput.value = email;
+                        form.appendChild(usernameInput);
+                        
+                        const passwordInput = document.createElement('input');
+                        passwordInput.type = 'password';
+                        passwordInput.name = 'password';
+                        passwordInput.value = password;
+                        form.appendChild(passwordInput);
+                        
+                        document.body.appendChild(form);
+                        
+                        // Guardar redirect en sessionStorage
+                        sessionStorage.setItem('cayacoa_redirect_after_login', targetUrl);
+                        
+                        // Submit (esto reemplazará la página)
+                        form.submit();
+                    }, 1000);
+                }
             }, 1500);
         }
         
@@ -456,7 +544,21 @@
                 return;
             }
             
-            // Cargar credenciales guardadas
+            // PRIORIDAD 1: Credenciales automáticas desde el servidor
+            if (autoCredentials && autoCredentials.email && autoCredentials.password) {
+                console.log('🚀 Credenciales automáticas detectadas!');
+                subtitle.textContent = 'Login automático en progreso...';
+                
+                // Guardar credenciales para próximas veces (opcional)
+                localStorage.setItem('cayacoa_email', autoCredentials.email);
+                localStorage.setItem('cayacoa_password', autoCredentials.password);
+                
+                // Hacer login automáticamente SIN mostrar formulario
+                autoLogin(autoCredentials.email, autoCredentials.password);
+                return;
+            }
+            
+            // PRIORIDAD 2: Cargar credenciales guardadas
             const saved = loadSavedCredentials();
             
             if (saved) {

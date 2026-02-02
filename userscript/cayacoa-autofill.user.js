@@ -385,6 +385,23 @@
     
     // Ejecutar cuando el DOM esté listo
     function initAutoFill() {
+        // PRIORIDAD 1: Verificar si hay redirect pendiente después del login desde PWA
+        const pendingRedirect = sessionStorage.getItem('cayacoa_redirect_after_login');
+        if (pendingRedirect && !window.location.pathname.includes('/login')) {
+            console.log('🔀 Redirect pendiente detectado desde PWA');
+            console.log('🎯 Redirigiendo a:', pendingRedirect);
+            
+            // Limpiar el redirect para evitar loops
+            sessionStorage.removeItem('cayacoa_redirect_after_login');
+            
+            // Redirigir después de 1 segundo (para dar tiempo a que Cayacoa termine de cargar)
+            setTimeout(() => {
+                window.location.href = pendingRedirect;
+            }, 1000);
+            
+            return; // No ejecutar más lógica
+        }
+        
         // Si estamos en la página de login, ejecutar auto-fill
         if (window.location.pathname.includes('/login')) {
             console.log('🔍 Página de login detectada');
