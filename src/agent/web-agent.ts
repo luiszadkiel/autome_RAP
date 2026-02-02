@@ -532,11 +532,12 @@ export class WebAgent {
                         const token = this.generatePaymentToken();
                         const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
-                        // Store token data
+                        // Store token data locally
                         this.storeTokenData(token, currentUrl, {
                             instruction: input.instruction,
                             credentials: input.credentials ? { email: input.credentials.email } : undefined,
-                            reservationInfo: paymentDetection.reservationInfo
+                            reservationInfo: paymentDetection.reservationInfo,
+                            cookies // Include cookies in local store
                         });
 
                         // Build reservation summary
@@ -555,6 +556,41 @@ export class WebAgent {
                                 reservationSummary.additionalInfo?.push(el.name);
                             }
                         });
+
+                        // ========== SAVE SESSION TO SERVER API ==========
+                        let shareableLink = '';
+                        try {
+                            const serverPort = process.env.PORT || 3000;
+                            const response = await fetch(`http://localhost:${serverPort}/api/session`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    token,
+                                    url: currentUrl,
+                                    cookies,
+                                    reservationInfo: {
+                                        date: reservationSummary.date,
+                                        time: reservationSummary.time,
+                                        price: reservationSummary.price
+                                    }
+                                })
+                            });
+
+                            if (response.ok) {
+                                const result = await response.json() as { shareableLink?: string };
+                                shareableLink = result.shareableLink || `http://localhost:${serverPort}/session/${token}`;
+                                console.log(`\n   🔗 ═══════════════════════════════════════════════════════`);
+                                console.log(`   📱 ENLACE PARA COMPARTIR POR WHATSAPP:`);
+                                console.log(`   ${shareableLink}`);
+                                console.log(`   ═══════════════════════════════════════════════════════`);
+                            } else {
+                                console.log(`   ⚠️ No se pudo guardar sesión en servidor: ${response.status}`);
+                                shareableLink = `http://localhost:${serverPort}/session/${token}`;
+                            }
+                        } catch (e) {
+                            console.log(`   ⚠️ Servidor no disponible para guardar sesión: ${e}`);
+                            shareableLink = `http://localhost:3000/session/${token}`;
+                        }
 
                         console.log(`\n   📋 RESUMEN DE RESERVA:`);
                         console.log(`      📅 Fecha: ${reservationSummary.date}`);
@@ -582,16 +618,17 @@ export class WebAgent {
                             this.recorder.stopRecording(true, 'Detenido en página de pago');
                         }
 
-                        // Build human-readable message
+                        // Build human-readable message with shareable link
                         const message = `🛑 PROCESO PAUSADO EN PÁGINA DE PAGO\n\n` +
                             `📋 Resumen de la reserva:\n` +
                             `   • Fecha: ${reservationSummary.date}\n` +
                             `   • Hora: ${reservationSummary.time}\n` +
                             `${reservationSummary.price ? `   • Precio: ${reservationSummary.price}\n` : ''}` +
-                            `\n🔗 Para continuar con el pago:\n` +
-                            `   URL: ${currentUrl}\n` +
-                            `   Token: ${token}\n` +
-                            `\n⚠️ El token expira en 1 hora (${expiresAt.toLocaleTimeString('es-ES')})`;
+                            `\n📱 ENLACE PARA COMPARTIR:\n` +
+                            `   ${shareableLink}\n` +
+                            `\n🔗 URL directa (requiere sesión):\n` +
+                            `   ${currentUrl}\n` +
+                            `\n⚠️ El enlace expira en 1 hora (${expiresAt.toLocaleTimeString('es-ES')})`;
 
                         return {
                             success: true,
@@ -611,6 +648,7 @@ export class WebAgent {
                             },
                             paymentPending: {
                                 stopped: true,
+                                shareableLink, // NEW: Link to share via WhatsApp
                                 continuationUrl: `${currentUrl}?token=${token}`,
                                 token,
                                 directUrl: currentUrl,

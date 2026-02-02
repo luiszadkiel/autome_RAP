@@ -88,6 +88,8 @@ export interface AgentResult {
     paymentPending?: {
         /** Whether the process was stopped at payment page */
         stopped: boolean;
+        /** Shareable link for WhatsApp - points to /session/:token */
+        shareableLink?: string;
         /** Continuation URL with token */
         continuationUrl: string;
         /** Unique token to resume the session */

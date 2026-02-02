@@ -574,6 +574,342 @@ export function createApiServer(config: {
         }
     });
 
+    // ============================================
+    // Continue Session - Open browser with saved cookies
+    // ============================================
+    app.post('/api/continue', async (c) => {
+        try {
+            const body = await c.req.json();
+
+            if (!body.url || !body.cookies) {
+                return c.json({
+                    success: false,
+                    error: 'Missing required fields: url and cookies',
+                }, 400);
+            }
+
+            console.log(`\n🔗 ════════════════════════════════════════════════════════`);
+            console.log(`   📍 Continuando sesión con cookies...`);
+            console.log(`   🌐 URL: ${body.url}`);
+            console.log(`   🍪 Cookies: ${body.cookies.length}`);
+            console.log(`   ════════════════════════════════════════════════════════\n`);
+
+            // Import BrowserClient dynamically
+            const { BrowserClient } = await import('../../browser/browser-client.js');
+
+            // Launch VISIBLE browser
+            const browser = new BrowserClient(
+                { headless: false, timeout: 30000 },
+                ''
+            );
+            await browser.launch();
+
+            // Set cookies before navigating
+            await browser.setCookies(body.cookies);
+
+            // Navigate to payment URL
+            await browser.goto(body.url);
+
+            console.log(`   ✅ Navegador abierto con sesión activa`);
+            console.log(`   👆 Completa el pago manualmente en el navegador\n`);
+
+            // Don't close browser - leave it open for user
+            return c.json({
+                success: true,
+                message: 'Navegador abierto con sesión activa - completa el pago manualmente',
+                url: body.url,
+            });
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Unknown error',
+            }, 500);
+        }
+    });
+
+    // ============================================
+    // Session Storage for Token-based sharing
+    // ============================================
+    interface StoredSession {
+        url: string;
+        cookies: any[];
+        reservationInfo?: {
+            date?: string;
+            time?: string;
+            price?: string;
+        };
+        createdAt: number;
+        expiresAt: number;
+    }
+
+    // In-memory session store (shared across requests)
+    const sessionStore = new Map<string, StoredSession>();
+
+    // Clean expired sessions periodically
+    setInterval(() => {
+        const now = Date.now();
+        for (const [token, session] of sessionStore.entries()) {
+            if (session.expiresAt < now) {
+                sessionStore.delete(token);
+                console.log(`   🗑️ Session expired and deleted: ${token}`);
+            }
+        }
+    }, 5 * 60 * 1000); // Clean every 5 minutes
+
+    // ============================================
+    // POST /api/session - Save session with cookies
+    // ============================================
+    app.post('/api/session', async (c) => {
+        try {
+            const body = await c.req.json();
+
+            if (!body.token || !body.url || !body.cookies) {
+                return c.json({
+                    success: false,
+                    error: 'Missing required fields: token, url, and cookies',
+                }, 400);
+            }
+
+            const session: StoredSession = {
+                url: body.url,
+                cookies: body.cookies,
+                reservationInfo: body.reservationInfo,
+                createdAt: Date.now(),
+                expiresAt: Date.now() + (60 * 60 * 1000), // 1 hour
+            };
+
+            sessionStore.set(body.token, session);
+
+            console.log(`\n🎫 ════════════════════════════════════════════════════════`);
+            console.log(`   ✅ Sesión guardada con token: ${body.token}`);
+            console.log(`   🌐 URL: ${body.url}`);
+            console.log(`   🍪 Cookies: ${body.cookies.length}`);
+            console.log(`   ⏱️ Expira: ${new Date(session.expiresAt).toISOString()}`);
+            console.log(`   ════════════════════════════════════════════════════════\n`);
+
+            // Build shareable link
+            const port = config.port || 3000;
+            const shareableLink = `http://localhost:${port}/session/${body.token}`;
+
+            return c.json({
+                success: true,
+                message: 'Sesión guardada correctamente',
+                token: body.token,
+                shareableLink,
+                expiresAt: new Date(session.expiresAt).toISOString(),
+            });
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Unknown error',
+            }, 500);
+        }
+    });
+
+    // ============================================
+    // GET /session/:token - Redirect with cookies injected
+    // ============================================
+    app.get('/session/:token', async (c) => {
+        const token = c.req.param('token');
+        const session = sessionStore.get(token);
+
+        if (!session) {
+            return c.html(`
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sesión No Encontrada</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+               display: flex; justify-content: center; align-items: center; 
+               height: 100vh; margin: 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+        .card { background: white; padding: 40px; border-radius: 16px; box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                text-align: center; max-width: 400px; }
+        h1 { color: #e74c3c; margin-bottom: 16px; }
+        p { color: #666; line-height: 1.6; }
+        .icon { font-size: 64px; margin-bottom: 16px; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">❌</div>
+        <h1>Sesión No Encontrada</h1>
+        <p>El enlace ha expirado o no es válido.<br>Por favor, solicita un nuevo enlace de pago.</p>
+    </div>
+</body>
+</html>
+            `, 404);
+        }
+
+        // Check if expired
+        if (session.expiresAt < Date.now()) {
+            sessionStore.delete(token);
+            return c.html(`
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sesión Expirada</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+               display: flex; justify-content: center; align-items: center; 
+               height: 100vh; margin: 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+        .card { background: white; padding: 40px; border-radius: 16px; box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                text-align: center; max-width: 400px; }
+        h1 { color: #f39c12; margin-bottom: 16px; }
+        p { color: #666; line-height: 1.6; }
+        .icon { font-size: 64px; margin-bottom: 16px; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">⏰</div>
+        <h1>Sesión Expirada</h1>
+        <p>Este enlace de pago ha expirado.<br>Por favor, solicita un nuevo enlace.</p>
+    </div>
+</body>
+</html>
+            `, 410);
+        }
+
+        // Generate HTML page that sets cookies and redirects
+        const cookiesJson = JSON.stringify(session.cookies);
+        const targetUrl = session.url;
+        const reservationHtml = session.reservationInfo ? `
+            <div class="info">
+                <p>📅 <strong>Fecha:</strong> ${session.reservationInfo.date || 'N/A'}</p>
+                <p>⏰ <strong>Hora:</strong> ${session.reservationInfo.time || 'N/A'}</p>
+                ${session.reservationInfo.price ? `<p>💰 <strong>Precio:</strong> ${session.reservationInfo.price}</p>` : ''}
+            </div>
+        ` : '';
+
+        return c.html(`
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cargando Sesión de Pago...</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+               display: flex; justify-content: center; align-items: center; 
+               height: 100vh; margin: 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+        .card { background: white; padding: 40px; border-radius: 16px; box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                text-align: center; max-width: 450px; }
+        h1 { color: #333; margin-bottom: 16px; font-size: 24px; }
+        p { color: #666; line-height: 1.6; }
+        .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #667eea; border-radius: 50%;
+                   width: 50px; height: 50px; animation: spin 1s linear infinite; margin: 20px auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .icon { font-size: 48px; margin-bottom: 16px; }
+        .info { background: #f8f9fa; padding: 16px; border-radius: 8px; margin: 16px 0; text-align: left; }
+        .info p { margin: 8px 0; color: #333; }
+        .btn { display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+               color: white; padding: 12px 32px; border-radius: 8px; text-decoration: none;
+               font-weight: 600; margin-top: 16px; transition: transform 0.2s; }
+        .btn:hover { transform: scale(1.05); }
+        .error { color: #e74c3c; background: #fde8e8; padding: 12px; border-radius: 8px; margin-top: 16px; display: none; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">💳</div>
+        <h1>Preparando Sesión de Pago</h1>
+        ${reservationHtml}
+        <div class="spinner" id="spinner"></div>
+        <p id="status">Configurando sesión...</p>
+        <div class="error" id="error"></div>
+        <a href="${targetUrl}" class="btn" id="manualBtn" style="display: none;">Continuar Manualmente</a>
+    </div>
+
+    <script>
+        (function() {
+            const cookies = ${cookiesJson};
+            const targetUrl = "${targetUrl}";
+            const statusEl = document.getElementById('status');
+            const spinnerEl = document.getElementById('spinner');
+            const errorEl = document.getElementById('error');
+            const manualBtn = document.getElementById('manualBtn');
+            
+            // Try to set cookies
+            let cookiesSet = 0;
+            cookies.forEach(function(cookie) {
+                try {
+                    // Build cookie string
+                    let cookieStr = cookie.name + '=' + encodeURIComponent(cookie.value);
+                    if (cookie.path) cookieStr += '; path=' + cookie.path;
+                    if (cookie.expires) {
+                        const expires = new Date(cookie.expires * 1000);
+                        cookieStr += '; expires=' + expires.toUTCString();
+                    }
+                    if (cookie.secure) cookieStr += '; secure';
+                    if (cookie.sameSite) cookieStr += '; samesite=' + cookie.sameSite;
+                    
+                    document.cookie = cookieStr;
+                    cookiesSet++;
+                } catch(e) {
+                    console.warn('Could not set cookie:', cookie.name, e);
+                }
+            });
+
+            statusEl.textContent = 'Cookies configuradas: ' + cookiesSet + '/' + cookies.length;
+
+            // Note: Cross-domain cookies won't work due to browser security
+            // Show warning if target is different domain
+            const currentDomain = window.location.hostname;
+            const targetDomain = new URL(targetUrl).hostname;
+            
+            if (currentDomain !== targetDomain) {
+                setTimeout(function() {
+                    spinnerEl.style.display = 'none';
+                    statusEl.innerHTML = '⚠️ <strong>Dominio diferente detectado</strong><br>' +
+                        'Las cookies no pueden transferirse entre dominios por seguridad del navegador.<br><br>' +
+                        'Para continuar, haz clic en el botón de abajo:';
+                    manualBtn.style.display = 'inline-block';
+                    errorEl.style.display = 'block';
+                    errorEl.innerHTML = '<strong>Nota:</strong> Es posible que necesites iniciar sesión nuevamente en el sitio de destino.';
+                }, 1000);
+            } else {
+                // Same domain - redirect
+                statusEl.textContent = 'Redirigiendo...';
+                setTimeout(function() {
+                    window.location.href = targetUrl;
+                }, 1500);
+            }
+        })();
+    </script>
+</body>
+</html>
+        `);
+    });
+
+    // ============================================
+    // GET /api/session/:token - Get session info (for debugging)
+    // ============================================
+    app.get('/api/session/:token', async (c) => {
+        const token = c.req.param('token');
+        const session = sessionStore.get(token);
+
+        if (!session) {
+            return c.json({ success: false, error: 'Session not found' }, 404);
+        }
+
+        return c.json({
+            success: true,
+            data: {
+                url: session.url,
+                cookieCount: session.cookies.length,
+                reservationInfo: session.reservationInfo,
+                createdAt: new Date(session.createdAt).toISOString(),
+                expiresAt: new Date(session.expiresAt).toISOString(),
+                expired: session.expiresAt < Date.now(),
+            }
+        });
+    });
+
     return {
 
         app,

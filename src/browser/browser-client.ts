@@ -822,6 +822,23 @@ export class BrowserClient {
     }
 
     /**
+     * Set cookies in the browser context to restore a session
+     */
+    async setCookies(cookies: {
+        name: string;
+        value: string;
+        domain: string;
+        path: string;
+        expires?: number;
+        httpOnly?: boolean;
+        secure?: boolean;
+        sameSite?: 'Lax' | 'Strict' | 'None';
+    }[]): Promise<void> {
+        if (!this.context) throw new Error('Browser not launched');
+        await this.context.addCookies(cookies);
+    }
+
+    /**
      * Take a snapshot of the page for AI analysis
      */
     async takeSnapshot(): Promise<PageSnapshot> {
@@ -2503,18 +2520,98 @@ export class BrowserClient {
 
         console.log(`   🎯 Direct time slot search for: "${targetTime}"`);
 
-        // Normalize the target time for matching
+        // Normalize the target time for matching (handle various formats)
         const normalizedTarget = targetTime.toLowerCase().replace(/\s+/g, '').trim();
 
-        // Use JavaScript to find, scroll to, and get info about the time slot
+        // Helper to normalize time strings for comparison
+        const normalizeTimeStr = (str: string) => str.toLowerCase().replace(/\s+/g, '').trim();
+
+        // Use JavaScript to find, scroll to, and click the time slot
         const result = await this.page.evaluate((target: string) => {
+            const normalizeTime = (str: string) => str.toLowerCase().replace(/\s+/g, '').trim();
+
+            // ========== STRATEGY 1: Search [data-tt] attributes FIRST (fastest) ==========
+            const bookitSlots = Array.from(document.querySelectorAll('[data-tt]'));
+            console.log(`🔍 Found ${bookitSlots.length} elements with data-tt attribute`);
+
+            for (const slot of bookitSlots) {
+                const dataTT = slot.getAttribute('data-tt') || '';
+                const normalizedDataTT = normalizeTime(dataTT);
+
+                // Match: "10:10am" === "10:10am" or "1010am" === "1010am"
+                const targetNoColon = target.replace(':', '');
+                const dataTTNoColon = normalizedDataTT.replace(':', '');
+
+                if (normalizedDataTT === target || dataTTNoColon === targetNoColon) {
+                    // Check if available (not filled/booked)
+                    const classes = (slot.className || '').toLowerCase();
+                    const isUnavailable = classes.includes('filled') ||
+                        classes.includes('booked') ||
+                        classes.includes('reserved') ||
+                        classes.includes('unavailable') ||
+                        classes.includes('disabled');
+
+                    // Scroll into view
+                    (slot as HTMLElement).scrollIntoView({ behavior: 'auto', block: 'center' });
+
+                    if (!isUnavailable) {
+                        (slot as HTMLElement).click();
+                        return {
+                            found: true,
+                            available: true,
+                            clicked: true,
+                            classes: classes,
+                            method: 'data-tt-direct'
+                        };
+                    } else {
+                        return {
+                            found: true,
+                            available: false,
+                            clicked: false,
+                            classes: classes,
+                            method: 'data-tt-unavailable'
+                        };
+                    }
+                }
+            }
+
+            // ========== STRATEGY 2: Search .thetime spans (Cayaco specific) ==========
+            const theTimeSpans = Array.from(document.querySelectorAll('.thetime'));
+            for (const span of theTimeSpans) {
+                const text = normalizeTime(span.textContent || '');
+                const targetNoColon = target.replace(':', '');
+                const textNoColon = text.replace(':', '');
+
+                if (text === target || textNoColon === targetNoColon) {
+                    // Find the parent .bookit container
+                    let bookitParent = span.parentElement;
+                    for (let i = 0; i < 5 && bookitParent; i++) {
+                        if (bookitParent.classList.contains('bookit') || bookitParent.hasAttribute('data-tt')) {
+                            break;
+                        }
+                        bookitParent = bookitParent.parentElement;
+                    }
+
+                    const clickTarget = bookitParent || span;
+                    const classes = (clickTarget.className || '').toLowerCase();
+                    const isUnavailable = classes.includes('filled') || classes.includes('booked');
+
+                    (clickTarget as HTMLElement).scrollIntoView({ behavior: 'auto', block: 'center' });
+
+                    if (!isUnavailable) {
+                        (clickTarget as HTMLElement).click();
+                        return { found: true, available: true, clicked: true, classes, method: 'thetime-span' };
+                    }
+                    return { found: true, available: false, clicked: false, classes, method: 'thetime-unavailable' };
+                }
+            }
+
+            // ========== STRATEGY 3: Generic text search (fallback) ==========
             const allElements = Array.from(document.querySelectorAll('span, div, td, a, button'));
 
-            // Find elements with matching time text
             for (const el of allElements) {
                 const text = (el.textContent || '').toLowerCase().replace(/\s+/g, '').trim();
                 if (text === target || text === target.replace('am', '') || text === target.replace('pm', '')) {
-                    // Check if this slot is available
                     let parent = el.parentElement;
                     let isAvailable = true;
                     let containerClasses = '';
@@ -2532,15 +2629,12 @@ export class BrowserClient {
                         parent = parent.parentElement;
                     }
 
-                    // Scroll the element into view
                     (el as HTMLElement).scrollIntoView({ behavior: 'auto', block: 'center' });
 
                     if (isAvailable) {
-                        // Click the element or its clickable parent
                         let clickTarget: HTMLElement | null = el as HTMLElement;
                         let current = el.parentElement;
 
-                        // Find the best clickable parent
                         for (let i = 0; i < 5 && current; i++) {
                             if (current.hasAttribute('data-tt') ||
                                 current.classList.contains('bookit') ||
@@ -2556,15 +2650,15 @@ export class BrowserClient {
 
                         if (clickTarget) {
                             clickTarget.click();
-                            return { found: true, available: true, clicked: true, classes: containerClasses };
+                            return { found: true, available: true, clicked: true, classes: containerClasses, method: 'fallback' };
                         }
                     }
 
-                    return { found: true, available: false, clicked: false, classes: containerClasses };
+                    return { found: true, available: false, clicked: false, classes: containerClasses, method: 'fallback-unavailable' };
                 }
             }
 
-            return { found: false, available: false, clicked: false, classes: '' };
+            return { found: false, available: false, clicked: false, classes: '', method: 'not-found' };
         }, normalizedTarget);
 
         if (!result.found) {

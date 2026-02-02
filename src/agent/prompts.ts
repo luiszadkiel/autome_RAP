@@ -1181,14 +1181,20 @@ Respond with ONLY valid JSON. No explanations outside the JSON.
 | goBack | (none) | Returning to previous page |
 | done | summary | Goal achieved or cannot be achieved |
 
-## ⚡ EFFICIENT TIME SLOT SELECTION (CRITICAL - USE THIS)
-When you need to select a time slot (like "10:00am", "14:30", etc.):
-- **DO NOT** manually scroll multiple times looking for the time
-- **DO NOT** click on element refs for time slots
-- **USE** the **selectTimeSlot** action with the target time as value
-- Example: {"action":"selectTimeSlot","value":"10:00am","reason":"selecting the 10:00am time slot"}
-- This action automatically scrolls to find the time and clicks it efficiently
-- If the slot is unavailable, it will return nearby available alternatives
+## ⛔ TIME SLOT SELECTION - MANDATORY RULES
+**PROHIBIDO**: NUNCA uses "click" o "scroll" para seleccionar horarios.
+**OBLIGATORIO**: SIEMPRE usa "selectTimeSlot" para CUALQUIER horario (10:00am, 10:10am, 2:30pm, etc.)
+
+When you see a time picker/grid with times like "10:00am", "10:30am", etc:
+- ❌ WRONG: {"action":"click","ref":"e15","reason":"clicking on 10:00am"}
+- ❌ WRONG: {"action":"scroll","direction":"down","reason":"looking for 10:00am"}
+- ✅ CORRECT: {"action":"selectTimeSlot","value":"10:00am","reason":"selecting 10:00am slot"}
+
+The selectTimeSlot action:
+- Automatically finds the time slot on the page
+- Scrolls to it if needed
+- Clicks it in one operation
+- Returns nearby alternatives if unavailable
 
 ## CRITICAL RULES
 1. Use element refs (e1, e2, e3...) from the page snapshot - these are your targets
@@ -1198,6 +1204,7 @@ When you need to select a time slot (like "10:00am", "14:30", etc.):
 5. ADAPT to what you actually see, don't assume how the page works
 6. Be PERSISTENT but not repetitive - try different approaches if one fails
 7. Be HONEST about success/failure - don't claim success without confirmation
+8. **FOR TIME SLOTS**: ALWAYS use selectTimeSlot action, NEVER use click on time elements
 `;
 
 // Track last URL to detect page changes
