@@ -1,0 +1,438 @@
+import { Page } from 'playwright';
+
+export interface VerificationResult {
+    success: boolean;
+    confidence: number; // 0-100
+    reason: string;
+    shouldRetry: boolean;
+    suggestedAction?: string;
+    evidence: {
+        domChanged: boolean;
+        urlChanged: boolean;
+        newElementsAppeared: boolean;
+        targetElementChanged: boolean;
+        errorsDetected: string[];
+        loadingComplete: boolean;
+        networkIdle: boolean;
+    };
+}
+
+export interface ActionContext {
+    action: string;
+    targetRef?: string;
+    targetSelector?: string;
+    value?: string;
+    expectedOutcome?: string;
+}
+
+export interface PageFingerprint {
+    url: string;
+    title: string;
+    elementCount: number;
+    visibleElementsHash: string;
+    hasModal: boolean;
+    activeFormInputs: number;
+    bodyLength: number;
+}
+
+export interface ElementState {
+    exists: boolean;
+    visible: boolean;
+    enabled: boolean;
+    text: string;
+    value: string;
+    checked?: boolean;
+    selected?: number;
+    position: { x: number; y: number };
+    classes: string;
+}
+
+export interface PreActionState {
+    url: string;
+    fingerprint: PageFingerprint;
+    targetState: ElementState | null;
+    timestamp: number;
+}
+
+export class ActionVerifier {
+    private previousSnapshot: PageFingerprint | null = null;
+    private previousUrl: string = '';
+    private stableChecks = 0;
+
+    /**
+     * Captura el estado ANTES de ejecutar una acción
+     */
+    async capturePreActionState(page: Page, context: ActionContext): Promise<PreActionState> {
+        const [fingerprint, targetState] = await Promise.all([
+            this.getPageFingerprint(page),
+            context.targetRef ? this.getElementState(page, context.targetRef) : null
+        ]);
+
+        return {
+            url: page.url(),
+            fingerprint,
+            targetState,
+            timestamp: Date.now()
+        };
+    }
+
+    /**
+     * Verifica el resultado DESPUÉS de ejecutar una acción
+     */
+    async verifyAction(
+        page: Page,
+        context: ActionContext,
+        preState: PreActionState
+    ): Promise<VerificationResult> {
+        // 1. Esperar estabilidad (máximo 3 segundos)
+        await this.waitForStability(page, 3000);
+
+        const evidence = {
+            domChanged: false,
+            urlChanged: false,
+            newElementsAppeared: false,
+            targetElementChanged: false,
+            errorsDetected: [] as string[],
+            loadingComplete: true,
+            networkIdle: true
+        };
+
+        // 2. Verificar cambio de URL
+        const currentUrl = page.url();
+        evidence.urlChanged = currentUrl !== preState.url;
+
+        // 3. Verificar cambios en DOM
+        const currentFingerprint = await this.getPageFingerprint(page);
+        evidence.domChanged = !this.fingerprintsEqual(preState.fingerprint, currentFingerprint);
+        evidence.newElementsAppeared = currentFingerprint.elementCount > preState.fingerprint.elementCount;
+
+        // 4. Verificar cambio en elemento objetivo
+        if (context.targetRef && preState.targetState) {
+            const currentTargetState = await this.getElementState(page, context.targetRef);
+            evidence.targetElementChanged = !this.elementStatesEqual(preState.targetState, currentTargetState);
+        }
+
+        // 5. Detectar errores en la página
+        evidence.errorsDetected = await this.detectPageErrors(page);
+
+        // 6. Verificar loading completado
+        evidence.loadingComplete = await this.isLoadingComplete(page);
+
+        // 7. Verificar network idle
+        evidence.networkIdle = await this.isNetworkIdle(page);
+
+        // 8. Calcular resultado
+        return this.calculateVerificationResult(context, evidence, preState);
+    }
+
+    /**
+     * Espera hasta que la página esté estable
+     */
+    private async waitForStability(page: Page, maxWait: number): Promise<void> {
+        const startTime = Date.now();
+        let lastHtmlLength = 0;
+        let stableCount = 0;
+
+        while (Date.now() - startTime < maxWait && stableCount < 3) {
+            // Esperar un poco
+            await page.waitForTimeout(150);
+
+            // Verificar si el DOM cambió
+            const currentLength = await page.evaluate(() => document.body.innerHTML.length);
+
+            if (Math.abs(currentLength - lastHtmlLength) < 50) {
+                stableCount++;
+            } else {
+                stableCount = 0;
+                lastHtmlLength = currentLength;
+            }
+
+            // También verificar si hay requests pendientes
+            try {
+                await page.waitForLoadState('networkidle', { timeout: 500 });
+                break;
+            } catch {
+                // Continuar esperando
+            }
+        }
+    }
+
+    /**
+     * Obtiene una "huella digital" de la página para comparación rápida
+     */
+    private async getPageFingerprint(page: Page): Promise<PageFingerprint> {
+        return page.evaluate(() => {
+            const interactiveElements = document.querySelectorAll(
+                'button, input, select, a[href], [role="button"], [onclick]'
+            );
+
+            // Crear hash de elementos visibles
+            const visibleElements: string[] = [];
+            interactiveElements.forEach((el, idx) => {
+                if (el instanceof HTMLElement && el.offsetParent !== null) {
+                    visibleElements.push(`${el.tagName}:${el.textContent?.slice(0, 20) || idx}`);
+                }
+            });
+
+            // Detectar modales/overlays
+            const hasModal = !!document.querySelector(
+                '[role="dialog"], [role="alertdialog"], .modal.show, [aria-modal="true"]'
+            );
+
+            // Detectar formularios activos
+            const activeFormInputs = document.querySelectorAll('input:focus, select:focus, textarea:focus').length;
+
+            return {
+                url: window.location.href,
+                title: document.title,
+                elementCount: interactiveElements.length,
+                visibleElementsHash: visibleElements.slice(0, 20).join('|'),
+                hasModal,
+                activeFormInputs,
+                bodyLength: document.body.innerHTML.length
+            };
+        });
+    }
+
+    /**
+     * Obtiene el estado de un elemento específico
+     */
+    private async getElementState(page: Page, ref: string): Promise<ElementState | null> {
+        return page.evaluate((ref) => {
+            // Buscar por data-ref o por índice
+            let element: HTMLElement | null = null;
+
+            if (ref.startsWith('e') && !isNaN(parseInt(ref.slice(1)))) {
+                const index = parseInt(ref.replace('e', '')) - 1;
+                const elements = document.querySelectorAll('button, input, select, a');
+                if (index >= 0 && index < elements.length) {
+                    element = elements[index] as HTMLElement;
+                }
+            }
+
+            if (!element) {
+                element = document.querySelector(`[data-ref="${ref}"]`) as HTMLElement;
+            }
+
+            if (!element || !(element instanceof HTMLElement)) return null;
+
+            const rect = element.getBoundingClientRect();
+
+            return {
+                exists: true,
+                visible: element.offsetParent !== null,
+                enabled: !(element as HTMLButtonElement).disabled,
+                text: element.textContent?.slice(0, 50) || '',
+                value: (element as HTMLInputElement).value || '',
+                checked: (element as HTMLInputElement).checked,
+                selected: (element as HTMLSelectElement).selectedIndex,
+                position: { x: rect.x, y: rect.y },
+                classes: element.className
+            };
+        }, ref);
+    }
+
+    /**
+     * Detecta mensajes de error en la página
+     */
+    private async detectPageErrors(page: Page): Promise<string[]> {
+        return page.evaluate(() => {
+            const errors: string[] = [];
+
+            // Selectores de errores comunes
+            const errorSelectors = [
+                '.error', '.alert-danger', '.alert-error', '.error-message',
+                '[role="alert"]', '.toast-error', '.notification-error',
+                '.form-error', '.field-error', '.validation-error',
+                '[class*="error"]:not([class*="no-error"])',
+                '.invalid-feedback:not(:empty)'
+            ];
+
+            for (const selector of errorSelectors) {
+                const elements = document.querySelectorAll(selector);
+                elements.forEach(el => {
+                    if (el instanceof HTMLElement && el.offsetParent !== null && el.textContent?.trim()) {
+                        errors.push(el.textContent.trim().slice(0, 100));
+                    }
+                });
+            }
+
+            // También verificar inputs inválidos
+            const invalidInputs = document.querySelectorAll('input:invalid, [aria-invalid="true"]');
+            if (invalidInputs.length > 0) {
+                errors.push(`${invalidInputs.length} campo(s) con validación fallida`);
+            }
+
+            return [...new Set(errors)]; // Eliminar duplicados
+        });
+    }
+
+    /**
+     * Verifica si la página terminó de cargar
+     */
+    private async isLoadingComplete(page: Page): Promise<boolean> {
+        return page.evaluate(() => {
+            // Verificar spinners/loaders
+            const loadingIndicators = document.querySelectorAll(
+                '.loading, .spinner, .loader, [class*="loading"], [class*="spinner"],' +
+                '.sk-spinner, .lds-ring, .lds-dual-ring, [aria-busy="true"]'
+            );
+
+            for (const indicator of Array.from(loadingIndicators)) {
+                if (indicator instanceof HTMLElement && indicator.offsetParent !== null) {
+                    return false;
+                }
+            }
+
+            // Verificar skeleton screens
+            const skeletons = document.querySelectorAll('[class*="skeleton"], [class*="placeholder"]');
+            for (const skeleton of Array.from(skeletons)) {
+                if (skeleton instanceof HTMLElement && skeleton.offsetParent !== null) {
+                    return false;
+                }
+            }
+
+            return document.readyState === 'complete';
+        });
+    }
+
+    /**
+     * Verifica si hay requests de red pendientes
+     */
+    private async isNetworkIdle(page: Page): Promise<boolean> {
+        try {
+            await page.waitForLoadState('networkidle', { timeout: 1000 });
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Calcula el resultado final de la verificación
+     */
+    private calculateVerificationResult(
+        context: ActionContext,
+        evidence: VerificationResult['evidence'],
+        preState: PreActionState
+    ): VerificationResult {
+        let confidence = 50; // Base
+        const reasons: string[] = [];
+        let shouldRetry = false;
+        let suggestedAction: string | undefined;
+
+        // === Reglas por tipo de acción ===
+
+        switch (context.action) {
+            case 'click':
+                // Un click exitoso generalmente produce cambios
+                if (evidence.domChanged) {
+                    confidence += 25;
+                    reasons.push('DOM cambió después del click');
+                }
+                if (evidence.urlChanged) {
+                    confidence += 25;
+                    reasons.push('Navegó a nueva página');
+                }
+                if (evidence.newElementsAppeared) {
+                    confidence += 15;
+                    reasons.push('Aparecieron nuevos elementos');
+                }
+                if (!evidence.domChanged && !evidence.urlChanged) {
+                    confidence -= 30;
+                    reasons.push('No hubo cambios visibles');
+                    shouldRetry = true;
+                    suggestedAction = 'Intentar doble click o verificar si el elemento es clickeable';
+                }
+                break;
+
+            case 'type':
+                if (evidence.targetElementChanged) {
+                    confidence += 35;
+                    reasons.push('El campo de texto fue actualizado');
+                } else {
+                    confidence -= 25;
+                    reasons.push('El texto no parece haberse ingresado');
+                    shouldRetry = true;
+                }
+                break;
+
+            case 'select':
+            case 'selectTimeSlot':
+                if (evidence.targetElementChanged || evidence.domChanged) {
+                    confidence += 30;
+                    reasons.push('Selección aplicada');
+                }
+                if (evidence.newElementsAppeared) {
+                    confidence += 15;
+                    reasons.push('UI actualizada tras selección');
+                }
+                break;
+
+            case 'navigate':
+                if (evidence.urlChanged) {
+                    confidence += 45;
+                    reasons.push('Navegación exitosa');
+                } else {
+                    confidence -= 40;
+                    reasons.push('URL no cambió');
+                    shouldRetry = true;
+                }
+                break;
+
+            case 'scroll':
+                // Scroll casi siempre funciona
+                confidence += 20;
+                if (evidence.newElementsAppeared) {
+                    confidence += 25;
+                    reasons.push('Scroll reveló nuevos elementos');
+                }
+                break;
+
+            case 'wait':
+                if (evidence.loadingComplete) {
+                    confidence += 30;
+                    reasons.push('Carga completada');
+                }
+                break;
+        }
+
+        // === Penalizaciones globales ===
+
+        if (evidence.errorsDetected.length > 0) {
+            confidence -= 35;
+            reasons.push(`Errores detectados: ${evidence.errorsDetected[0]}`);
+            shouldRetry = true;
+        }
+
+        if (!evidence.loadingComplete) {
+            confidence -= 15;
+            reasons.push('Página aún cargando');
+        }
+
+        // === Resultado final ===
+
+        confidence = Math.max(0, Math.min(100, confidence));
+
+        return {
+            success: confidence >= 55 && evidence.errorsDetected.length === 0,
+            confidence,
+            reason: reasons.join('. '),
+            shouldRetry,
+            suggestedAction,
+            evidence
+        };
+    }
+
+    private fingerprintsEqual(a: PageFingerprint, b: PageFingerprint): boolean {
+        return a.visibleElementsHash === b.visibleElementsHash &&
+            a.hasModal === b.hasModal &&
+            Math.abs(a.bodyLength - b.bodyLength) < 100;
+    }
+
+    private elementStatesEqual(a: ElementState | null, b: ElementState | null): boolean {
+        if (!a || !b) return a === b;
+        return a.text === b.text && a.value === b.value &&
+            a.checked === b.checked && a.selected === b.selected;
+    }
+}
