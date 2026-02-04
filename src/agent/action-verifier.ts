@@ -402,25 +402,46 @@ export class ActionVerifier {
                 break;
         }
 
-        // === Penalizaciones globales ===
+        // === Penalizaciones globales (suavizadas para sitios lentos/modales) ===
+
+        const onlyValidationError =
+            evidence.errorsDetected.length === 1 &&
+            evidence.errorsDetected[0].includes('validación fallida');
+        const hasPositiveEvidence =
+            evidence.domChanged || evidence.urlChanged || evidence.newElementsAppeared || evidence.targetElementChanged;
 
         if (evidence.errorsDetected.length > 0) {
-            confidence -= 35;
-            reasons.push(`Errores detectados: ${evidence.errorsDetected[0]}`);
-            shouldRetry = true;
+            if (onlyValidationError && hasPositiveEvidence) {
+                confidence -= 10;
+                reasons.push(`Nota: ${evidence.errorsDetected[0]} (no bloqueante)`);
+            } else {
+                confidence -= 35;
+                reasons.push(`Errores detectados: ${evidence.errorsDetected[0]}`);
+                shouldRetry = true;
+            }
         }
 
         if (!evidence.loadingComplete) {
-            confidence -= 15;
-            reasons.push('Página aún cargando');
+            if (!hasPositiveEvidence) {
+                confidence -= 15;
+                reasons.push('Página aún cargando');
+            } else {
+                confidence -= 5;
+                reasons.push('Página aún cargando (se ignora por cambios detectados)');
+            }
         }
 
         // === Resultado final ===
 
         confidence = Math.max(0, Math.min(100, confidence));
 
+        const allowSuccessWithValidation =
+            onlyValidationError && hasPositiveEvidence && confidence >= 55;
+        const noBlockingErrors =
+            evidence.errorsDetected.length === 0 || allowSuccessWithValidation;
+
         return {
-            success: confidence >= 55 && evidence.errorsDetected.length === 0,
+            success: confidence >= 55 && noBlockingErrors,
             confidence,
             reason: reasons.join('. '),
             shouldRetry,

@@ -54,21 +54,43 @@ export class ElementResolver {
     private async byExactText(page: Page, el: OptimizedElement): Promise<ResolveResult> {
         if (!el.text || el.text.length < 2) return { found: false, locator: null, method: 'text', confidence: 0 };
 
-        // Intentar texto exacto primero
+        // Intentar texto exacto primero - solo elementos visibles
         let locator = page.getByText(el.text, { exact: true });
-        let count = await locator.count();
+        
+        // Filtrar solo elementos visibles
+        let visibleLocator = locator.and(page.locator(':visible'));
+        let count = await visibleLocator.count();
 
         if (count === 1) {
-            return { found: true, locator, method: 'exactText', confidence: 95 };
+            // Verificar que realmente es visible
+            const isVisible = await visibleLocator.isVisible().catch(() => false);
+            if (isVisible) {
+                return { found: true, locator: visibleLocator, method: 'exactText', confidence: 95 };
+            }
+        }
+
+        // Si hay múltiples, intentar filtrar por el que es realmente interactivo
+        if (count > 1) {
+            const elements = await visibleLocator.all();
+            for (const element of elements) {
+                const isVisible = await element.isVisible().catch(() => false);
+                if (isVisible) {
+                    return { found: true, locator: element, method: 'exactText', confidence: 90 };
+                }
+            }
         }
 
         // Intentar texto parcial
         if (el.text.length > 10) {
             locator = page.getByText(el.text.slice(0, 20));
-            count = await locator.count();
+            visibleLocator = locator.and(page.locator(':visible'));
+            count = await visibleLocator.count();
 
             if (count === 1) {
-                return { found: true, locator, method: 'partialText', confidence: 80 };
+                const isVisible = await visibleLocator.isVisible().catch(() => false);
+                if (isVisible) {
+                    return { found: true, locator: visibleLocator, method: 'partialText', confidence: 80 };
+                }
             }
         }
 

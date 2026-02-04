@@ -305,6 +305,8 @@ program
             console.log(chalk.gray('  POST /api/flows/execute  - Execute a flow'));
             console.log(chalk.gray('  POST /api/flows/replay   - Replay with validation'));
             console.log(chalk.gray('  DELETE /api/flows/:id    - Delete a flow'));
+            console.log(chalk.gray('  POST /api/agent          - Execute AI agent'));
+            console.log(chalk.gray('  POST /api/agent/parallel - Execute on multiple sites (1-10)'));
             console.log(chalk.gray('\nPress Ctrl+C to stop'));
         } catch (error) {
             console.error(chalk.red(`Error: ${error instanceof Error ? error.message : error}`));

@@ -1,4 +1,11 @@
 
+export interface ExtractedInfo {
+    type: string;       // Ej: "restaurant", "price", "availability", "error"
+    content: string;    // El contenido extraído
+    source?: string;    // URL o elemento donde se encontró
+    timestamp: number;
+}
+
 export interface AgentState {
     currentStep: number;
     maxSteps: number;
@@ -6,8 +13,10 @@ export interface AgentState {
     executedActions: ActionRecord[];
     failedActions: ActionRecord[];
     stuckDetectionCounter: number;
+    recoveryAttempts: number; // Contador de intentos de recuperación consecutivos
     lastSnapshotHash: string;
     objectiveProgress: number; // 0-100
+    extractedInfo: ExtractedInfo[]; // Información extraída durante la navegación
 }
 
 export interface ActionRecord {
@@ -43,8 +52,10 @@ export class StateManager {
             executedActions: [],
             failedActions: [],
             stuckDetectionCounter: 0,
+            recoveryAttempts: 0,
             lastSnapshotHash: '',
-            objectiveProgress: 0
+            objectiveProgress: 0,
+            extractedInfo: []
         };
     }
 
@@ -85,6 +96,31 @@ export class StateManager {
      */
     isStuck(): boolean {
         return this.state.stuckDetectionCounter >= this.STUCK_THRESHOLD;
+    }
+
+    /**
+     * Registra un intento de recuperación
+     * Retorna true si se debe continuar con recuperación, false si ya se agotaron intentos
+     */
+    recordRecoveryAttempt(): boolean {
+        this.state.recoveryAttempts++;
+        const MAX_RECOVERY_ATTEMPTS = 3;
+        
+        if (this.state.recoveryAttempts >= MAX_RECOVERY_ATTEMPTS) {
+            console.log(`   ⚠️ Máximo de ${MAX_RECOVERY_ATTEMPTS} intentos de recuperación alcanzado, forzando nueva estrategia...`);
+            this.resetStuckState();
+            return false; // No más recuperación, forzar al LLM
+        }
+        return true; // Continuar con recuperación
+    }
+
+    /**
+     * Resetea el estado de atascado después de recuperación exitosa o forzada
+     */
+    resetStuckState(): void {
+        this.state.stuckDetectionCounter = 0;
+        this.state.recoveryAttempts = 0;
+        this.state.lastSnapshotHash = ''; // Forzar que el próximo snapshot sea "nuevo"
     }
 
     /**
@@ -180,5 +216,94 @@ export class StateManager {
 
     getState(): AgentState {
         return { ...this.state };
+    }
+
+    /**
+     * Registra una URL visitada
+     */
+    addVisitedUrl(url: string): void {
+        this.state.visitedUrls.add(url);
+    }
+
+    /**
+     * Agrega información extraída durante la navegación
+     */
+    addExtractedInfo(info: Omit<ExtractedInfo, 'timestamp'>): void {
+        this.state.extractedInfo.push({
+            ...info,
+            timestamp: Date.now()
+        });
+    }
+
+    /**
+     * Obtiene toda la información extraída
+     */
+    getExtractedInfo(): ExtractedInfo[] {
+        return [...this.state.extractedInfo];
+    }
+
+    /**
+     * Genera un resumen final de toda la información extraída
+     */
+    generateFinalSummary(objective: string, finalStatus: string): string {
+        const info = this.state.extractedInfo;
+        const actions = this.state.executedActions;
+        const visitedUrls = Array.from(this.state.visitedUrls);
+
+        let summary = `\n📋 RESUMEN DE INFORMACIÓN EXTRAÍDA\n`;
+        summary += `${'='.repeat(50)}\n`;
+        summary += `🎯 Objetivo: ${objective}\n`;
+        summary += `📊 Estado final: ${finalStatus}\n`;
+        summary += `📍 Pasos ejecutados: ${this.state.currentStep}\n\n`;
+
+        // URLs visitadas
+        if (visitedUrls.length > 0) {
+            summary += `🔗 URLs visitadas:\n`;
+            visitedUrls.forEach(url => summary += `   • ${url}\n`);
+            summary += '\n';
+        }
+
+        // Información extraída agrupada por tipo
+        if (info.length > 0) {
+            summary += `📦 Información encontrada:\n`;
+            const byType = info.reduce((acc, item) => {
+                if (!acc[item.type]) acc[item.type] = [];
+                acc[item.type].push(item);
+                return acc;
+            }, {} as Record<string, ExtractedInfo[]>);
+
+            for (const [type, items] of Object.entries(byType)) {
+                summary += `\n   [${type.toUpperCase()}]\n`;
+                items.forEach(item => {
+                    summary += `   • ${item.content}\n`;
+                    if (item.source) summary += `     Fuente: ${item.source}\n`;
+                });
+            }
+        } else {
+            summary += `⚠️ No se extrajo información específica durante la navegación.\n`;
+        }
+
+        // Acciones exitosas relevantes
+        const successfulActions = actions.filter(a => a.success && a.reason);
+        if (successfulActions.length > 0) {
+            summary += `\n✅ Acciones completadas:\n`;
+            successfulActions.slice(-10).forEach(a => {
+                summary += `   • ${a.action}${a.target ? `[${a.target}]` : ''}: ${a.reason}\n`;
+            });
+        }
+
+        // Errores encontrados
+        const failedActions = this.state.failedActions;
+        if (failedActions.length > 0) {
+            summary += `\n❌ Problemas encontrados:\n`;
+            const uniqueErrors = [...new Set(failedActions.map(a => a.reason || a.action))];
+            uniqueErrors.slice(0, 5).forEach(err => {
+                summary += `   • ${err}\n`;
+            });
+        }
+
+        summary += `\n${'='.repeat(50)}\n`;
+
+        return summary;
     }
 }

@@ -102,15 +102,18 @@ export class GenericAdapter implements SiteAdapter {
 
     getPaymentDetector(): PaymentDetector {
         return {
+            // Indicadores más estrictos - solo formularios de pago reales
             indicators: [
-                'input[name*="card"]', 'input[name*="credit"]', 'input[id*="card"]',
-                '[class*="payment"]', '[class*="checkout"]', '[class*="stripe"]',
-                'iframe[src*="stripe"]', 'iframe[src*="paypal"]',
-                'button:has-text("pay")', 'button:has-text("pagar")',
-                '[data-testid*="payment"]'
+                'input[name="card_number"]', 'input[name="cardnumber"]', 'input[id="card-number"]',
+                'input[name="credit_card"]', 'input[autocomplete="cc-number"]',
+                'iframe[src*="stripe.com"]', 'iframe[src*="paypal.com"]', 'iframe[src*="braintree"]',
+                'form[action*="payment"]', 'form[action*="checkout"]',
+                '[data-braintree-id]', '[data-stripe]'
             ],
+            // Patrones de URL más específicos (solo rutas de checkout activo)
             urlPatterns: [
-                /checkout/i, /payment/i, /pay/i, /cart/i, /pago/i
+                /\/checkout\/payment/i, /\/checkout\/confirm/i,
+                /\/payment\/process/i, /\/pago\/confirmar/i
             ]
         };
     }

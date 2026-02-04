@@ -15,6 +15,7 @@ import { ExecuteFlowUseCase } from '../../application/use-cases/flow-management/
 import { ReplayFlowUseCase } from '../../application/use-cases/flow-management/ReplayFlowUseCase.js';
 import { PlaywrightBrowserAdapter } from '../../infrastructure/browser/PlaywrightBrowserAdapter.js';
 import { WebAgent } from '../../agent/web-agent.js';
+import { ParallelAgent } from '../../agent/parallel-agent.js';
 
 
 // OpenAPI Schema
@@ -264,6 +265,101 @@ const openApiSpec = {
                                                 summary: { type: 'string' },
                                                 stepsExecuted: { type: 'integer' },
                                                 data: { type: 'object' }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        '/api/agent/parallel': {
+            post: {
+                summary: '🚀 Ejecutar agente en múltiples sitios en paralelo',
+                description: 'Ejecuta el agente IA en múltiples URLs simultáneamente (1-10 sitios). Ideal para comparar precios, buscar productos en varias tiendas, etc.',
+                tags: ['AI Agent'],
+                requestBody: {
+                    required: true,
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                required: ['instruction', 'targets'],
+                                properties: {
+                                    instruction: { type: 'string', description: 'Instrucción en lenguaje natural (se aplica a todos los sitios)' },
+                                    targets: {
+                                        type: 'array',
+                                        description: 'Lista de sitios web (1-10 máximo)',
+                                        items: {
+                                            type: 'object',
+                                            required: ['url', 'name'],
+                                            properties: {
+                                                url: { type: 'string', description: 'URL del sitio' },
+                                                name: { type: 'string', description: 'Nombre identificador del sitio' },
+                                                credentials: {
+                                                    type: 'object',
+                                                    properties: {
+                                                        email: { type: 'string' },
+                                                        username: { type: 'string' },
+                                                        password: { type: 'string' }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                                    maxParallel: { type: 'integer', default: 3, minimum: 1, maximum: 10, description: 'Cantidad de agentes ejecutándose simultáneamente' },
+                                    maxStepsPerAgent: { type: 'integer', default: 15, description: 'Máximo de pasos por agente' },
+                                    headless: { type: 'boolean', default: true, description: 'Ejecutar sin mostrar navegadores' }
+                                }
+                            },
+                            example: {
+                                instruction: 'buscar precio de taladro DeWalt DCD771',
+                                targets: [
+                                    { url: 'https://www.amazon.com', name: 'Amazon' },
+                                    { url: 'https://www.homedepot.com', name: 'Home Depot' },
+                                    { url: 'https://www.lowes.com', name: 'Lowes' }
+                                ],
+                                maxParallel: 3,
+                                maxStepsPerAgent: 15,
+                                headless: true
+                            }
+                        }
+                    }
+                },
+                responses: {
+                    '200': {
+                        description: 'Resultado comparativo de todos los sitios',
+                        content: {
+                            'application/json': {
+                                schema: {
+                                    type: 'object',
+                                    properties: {
+                                        success: { type: 'boolean' },
+                                        data: {
+                                            type: 'object',
+                                            properties: {
+                                                instruction: { type: 'string' },
+                                                totalTargets: { type: 'integer' },
+                                                successful: { type: 'integer' },
+                                                failed: { type: 'integer' },
+                                                results: {
+                                                    type: 'array',
+                                                    items: {
+                                                        type: 'object',
+                                                        properties: {
+                                                            target: { type: 'string' },
+                                                            url: { type: 'string' },
+                                                            status: { type: 'string', enum: ['success', 'failed', 'error'] },
+                                                            extractedInfo: { type: 'array' },
+                                                            summary: { type: 'string' },
+                                                            duration: { type: 'integer' }
+                                                        }
+                                                    }
+                                                },
+                                                comparison: { type: 'string', description: 'Resumen comparativo con mejor precio si aplica' },
+                                                totalDuration: { type: 'integer' }
                                             }
                                         }
                                     }
@@ -557,6 +653,7 @@ export function createApiServer(config: {
             <li><code>POST /api/flows/execute</code> - Ejecutar flujo</li>
             <li><code>POST /api/flows/replay</code> - Reproducir con validación</li>
             <li><code>POST /api/agent</code> - Ejecutar agente IA</li>
+            <li><code>POST /api/agent/parallel</code> - Ejecutar en múltiples sitios (1-10)</li>
           </ul>
         </div>
         <div class="card highlight">
@@ -790,6 +887,89 @@ export function createApiServer(config: {
                 success: true,
                 data: result
             });
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Unknown error',
+            }, 500);
+        }
+    });
+
+    // ============================================
+    // Parallel Agent - Execute on multiple sites simultaneously
+    // ============================================
+    app.post('/api/agent/parallel', async (c) => {
+        const openaiKey = process.env.OPENAI_API_KEY;
+        if (!openaiKey) {
+            return c.json({
+                success: false,
+                error: 'OPENAI_API_KEY not configured on server',
+            }, 500);
+        }
+
+        try {
+            const body = await c.req.json();
+
+            // Validar campos requeridos
+            if (!body.instruction || !body.targets || !Array.isArray(body.targets)) {
+                return c.json({
+                    success: false,
+                    error: 'Missing required fields: instruction (string) and targets (array)',
+                    example: {
+                        instruction: "buscar precio de taladro DeWalt",
+                        targets: [
+                            { url: "https://ferreteria1.com", name: "Ferretería A" },
+                            { url: "https://ferreteria2.com", name: "Ferretería B", credentials: { email: "...", password: "..." } }
+                        ],
+                        maxParallel: 3,
+                        maxStepsPerAgent: 15,
+                        headless: true
+                    }
+                }, 400);
+            }
+
+            if (body.targets.length === 0) {
+                return c.json({
+                    success: false,
+                    error: 'targets array cannot be empty',
+                }, 400);
+            }
+
+            if (body.targets.length > 10) {
+                return c.json({
+                    success: false,
+                    error: 'Maximum 10 targets allowed per request',
+                }, 400);
+            }
+
+            // Validar cada target
+            for (const target of body.targets) {
+                if (!target.url || !target.name) {
+                    return c.json({
+                        success: false,
+                        error: 'Each target must have url and name fields',
+                    }, 400);
+                }
+            }
+
+            const parallelAgent = new ParallelAgent({
+                openaiApiKey: openaiKey,
+                maxParallel: body.maxParallel || 3,
+                headless: body.headless ?? true,
+                maxStepsPerAgent: body.maxStepsPerAgent || 15
+            });
+
+            const result = await parallelAgent.run({
+                instruction: body.instruction,
+                targets: body.targets,
+                maxParallel: body.maxParallel
+            });
+
+            return c.json({
+                success: true,
+                data: result
+            });
+
         } catch (error) {
             return c.json({
                 success: false,

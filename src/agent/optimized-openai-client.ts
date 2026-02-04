@@ -11,9 +11,15 @@ export interface ActionDecision {
     why?: string;
 }
 
+export interface ExtractedInfoItem {
+    type: string;
+    content: string;
+}
+
 export interface BatchDecision {
     thinking: string;
     actions: ActionDecision[];
+    extractedInfo: ExtractedInfoItem[];
     expectedResult: string;
     confidence: number;
     isComplete: boolean;
@@ -91,6 +97,7 @@ export class OptimizedOpenAIClient {
             return {
                 thinking: 'Error de API, esperando recuperación',
                 actions: [{ action: 'wait', value: '5000', why: 'Error de API' }],
+                extractedInfo: [],
                 expectedResult: 'Recuperación del servicio',
                 confidence: 0,
                 isComplete: false
@@ -106,6 +113,7 @@ export class OptimizedOpenAIClient {
             const decision: BatchDecision = {
                 thinking: parsed.thinking || 'Sin análisis',
                 actions: Array.isArray(parsed.actions) ? parsed.actions : [],
+                extractedInfo: Array.isArray(parsed.extractedInfo) ? parsed.extractedInfo : [],
                 expectedResult: parsed.expectedResult || 'Sin resultado esperado',
                 confidence: parsed.confidence || 50,
                 isComplete: !!parsed.isComplete,
@@ -140,6 +148,7 @@ export class OptimizedOpenAIClient {
             return {
                 thinking: 'Error de parsing',
                 actions: [{ action: 'wait', why: 'Error de formato JSON' }],
+                extractedInfo: [],
                 expectedResult: 'Reintento',
                 confidence: 0,
                 isComplete: false

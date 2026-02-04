@@ -12,6 +12,8 @@ export interface FormattedSnapshot {
 
 interface GroupedElements {
     modal: OptimizedElement[];
+    pickers: OptimizedElement[];       // Selectores de fecha/hora/personas
+    autocomplete: OptimizedElement[];  // Opciones de autocompletado/dropdown
     forms: OptimizedElement[];
     navigation: OptimizedElement[];
     actions: OptimizedElement[];
@@ -43,24 +45,52 @@ export class SnapshotFormatter {
     private groupElements(elements: OptimizedElement[]): GroupedElements {
         const groups: GroupedElements = {
             modal: [],
+            pickers: [],
             forms: [],
+            autocomplete: [],
             navigation: [],
             actions: [],
             other: []
         };
 
-        // Simple heuristic for modal elements based on position or parents could go here
-        // For now we rely on the implementation in OptimizedSnapshotExtractor to flag generic text, 
-        // but here we classify by type.
-
         for (const el of elements) {
-            if (el.isInput || el.tag === 'select' || el.tag === 'textarea') {
+            const testIdLower = el.testId?.toLowerCase() || '';
+            const idLower = el.id?.toLowerCase() || '';
+            const classLower = el.className?.toLowerCase() || '';
+            const ariaLower = el.ariaLabel?.toLowerCase() || '';
+
+            // 1. Selectores de fecha/hora/personas (pickers) - MUY IMPORTANTE para reservas
+            if (testIdLower.includes('picker') || testIdLower.includes('day-picker') ||
+                testIdLower.includes('time-picker') || testIdLower.includes('party-size') ||
+                idLower.includes('picker') || idLower.includes('calendar') ||
+                ariaLower.includes('selector de fecha') || ariaLower.includes('selector de hora') ||
+                ariaLower.includes('selector de tamaño') || ariaLower.includes('date picker') ||
+                classLower.includes('rdp-') || el.isCalendarDay) {
+                groups.pickers.push(el);
+            }
+            // 2. Opciones de autocomplete/dropdown (alta prioridad para búsquedas)
+            else if (el.role === 'option' || el.role === 'listitem' || 
+                testIdLower.includes('autocomplete') || testIdLower.includes('suggestion') ||
+                testIdLower.includes('restaurant-autocomplete') || testIdLower.includes('freetext-autocomplete') ||
+                idLower.includes('autocomplete') || idLower.includes('suggestion') ||
+                classLower.includes('autocomplete') || classLower.includes('suggestion') ||
+                classLower.includes('dropdown-item') || classLower.includes('result')) {
+                groups.autocomplete.push(el);
+            }
+            // 3. Campos de formulario
+            else if (el.isInput || el.tag === 'select' || el.tag === 'textarea' || el.isCombobox) {
                 groups.forms.push(el);
-            } else if (el.isLink || el.tag === 'nav' || el.role === 'navigation') {
+            }
+            // 4. Navegación
+            else if (el.isLink || el.tag === 'nav' || el.role === 'navigation') {
                 groups.navigation.push(el);
-            } else if (el.isButton || el.role === 'button' || el.tag === 'button') {
+            }
+            // 5. Botones de acción
+            else if (el.isButton || el.role === 'button' || el.tag === 'button') {
                 groups.actions.push(el);
-            } else {
+            }
+            // 6. Otros
+            else {
                 groups.other.push(el);
             }
         }
@@ -81,6 +111,20 @@ export class SnapshotFormatter {
             output += '\n';
         }
 
+        // Pickers (date/time/party size) - critical for reservations
+        if (groups.pickers.length > 0) {
+            output += '### 📅 DATE/TIME/PARTY PICKERS (for reservations)\n';
+            output += this.formatElementList(groups.pickers.slice(0, 20));
+            output += '\n';
+        }
+
+        // Autocomplete/Dropdown options (high priority when searching)
+        if (groups.autocomplete.length > 0) {
+            output += '### 🔍 SEARCH RESULTS / AUTOCOMPLETE OPTIONS (click to select)\n';
+            output += this.formatElementList(groups.autocomplete.slice(0, 15));
+            output += '\n';
+        }
+
         // Forms
         if (groups.forms.length > 0) {
             output += '### 📝 FORM FIELDS\n';
@@ -98,7 +142,7 @@ export class SnapshotFormatter {
         // Navigation
         if (groups.navigation.length > 0) {
             output += '### 🔗 NAVIGATION\n';
-            output += this.formatElementList(groups.navigation.slice(0, 15)); // Limit nav items
+            output += this.formatElementList(groups.navigation.slice(0, 15));
             output += '\n';
         }
 
@@ -119,8 +163,8 @@ export class SnapshotFormatter {
     }
 
     /**
-     * Formats an individual element
-     * Format: [ref] type "text" | relevant attributes
+     * Formats an individual element with rich context for LLM
+     * Format: [ref] type "text" | attributes | action hint
      */
     private formatElement(el: OptimizedElement): string {
         let line = `[${el.ref}] ${el.tag}`;
@@ -130,47 +174,101 @@ export class SnapshotFormatter {
             line += `(${el.type})`;
         }
 
-        // Add text or placeholder
+        // Add role if semantic
+        if (el.role && ['option', 'combobox', 'listbox', 'menu', 'menuitem', 'listitem', 'button', 'tab', 'grid'].includes(el.role)) {
+            line += `[role=${el.role}]`;
+        }
+
+        // Add text/placeholder/aria-label (primary identifier)
         if (el.text && el.text.length > 0) {
             line += ` "${this.truncate(el.text, 50)}"`;
         } else if (el.placeholder) {
-            line += ` ph="${this.truncate(el.placeholder, 30)}"`;
+            line += ` ph="${this.truncate(el.placeholder, 40)}"`;
         } else if (el.ariaLabel) {
-            line += ` aria="${this.truncate(el.ariaLabel, 30)}"`;
+            line += ` aria="${this.truncate(el.ariaLabel, 40)}"`;
         }
 
-        // Add current value if exists
+        // Add id if descriptive (helps identify the element)
+        if (el.id && !el.id.match(/^[a-f0-9-]{20,}$/i)) { // Skip random UUIDs
+            line += ` #${this.truncate(el.id, 30)}`;
+        }
+
+        // Add current value if exists (important for inputs)
         if (el.value && el.value.length > 0) {
-            line += ` [val="${this.truncate(el.value, 20)}"]`;
+            line += ` ➡️val="${this.truncate(el.value, 25)}"`;
         }
 
-        // Specialized displays
+        // Add inputValue for comboboxes
+        if (el.inputValue && el.inputValue.length > 0) {
+            line += ` ➡️input="${this.truncate(el.inputValue, 25)}"`;
+        }
+
+        // Specialized displays with context
         if (el.isCombobox) {
-            line += ` 🔽CBX${el.inputValue ? `=[${this.truncate(el.inputValue, 20)}]` : ''}`;
+            line += ` 🔽COMBOBOX`;
+            if (el.hasPopup) line += `→${el.hasPopup}`;
         }
         if (el.isCalendarDay) {
-            line += ` 📅DAY`;
-            if (el.isCurrentDate) line += '(TODAY)';
+            line += ` 📅`;
+            if (el.isCurrentDate) line += 'TODAY';
+            if (el.isSelected) line += '✓';
         }
-        if (el.selectedText && el.tag === 'select') {
-            line += ` 📝SEL="${this.truncate(el.selectedText, 30)}"`;
+        if (el.tag === 'select' && el.selectedText) {
+            line += ` 📋SEL="${this.truncate(el.selectedText, 25)}"`;
+            if (el.totalOptions) line += `(${el.totalOptions} opts)`;
         }
 
-        // Add important states
+        // Important states
         if (el.isDisabled) line += ' ⛔DISABLED';
-        if (el.isExpanded) line += ' 📂EXPANDED';
-        if (el.isSelected) line += ' ✅SELECTED';
-        if (el.isRequired) line += ' *REQ';
-        if (el.isFocused) line += ' 🎯FOCUSED';
-        if (el.isReadonly) line += ' 🔒READONLY';
-        if (el.isInvalid) line += ' ⚠️INVALID';
+        if (el.isExpanded) line += ' 📂OPEN';
+        if (el.isSelected && !el.isCalendarDay) line += ' ✅SEL';
+        if (el.isRequired) line += ' *';
+        if (el.isFocused) line += ' 🎯';
+        if (el.isReadonly) line += ' 🔒';
+        if (el.isInvalid) line += ' ⚠️ERR';
+        if (el.isPressed) line += ' ⬇️PRESSED';
 
-        // Add label if present (very helpful for context)
-        if (el.label) {
-            line += ` lbl="${this.truncate(el.label, 30)}"`;
+        // Controls relationship (important for understanding what element affects what)
+        if (el.controls) {
+            line += ` →controls:${this.truncate(el.controls, 20)}`;
         }
+
+        // Label (form context)
+        if (el.label) {
+            line += ` lbl="${this.truncate(el.label, 25)}"`;
+        }
+
+        // TestId (very useful for identifying elements)
+        if (el.testId) {
+            line += ` [${this.truncate(el.testId, 35)}]`;
+        }
+
+        // Add action hint based on element type
+        line += this.getActionHint(el);
 
         return line;
+    }
+
+    /**
+     * Provides action hints for the LLM based on element type
+     */
+    private getActionHint(el: OptimizedElement): string {
+        if (el.isDisabled) return '';
+        
+        if (el.tag === 'input') {
+            if (el.type === 'checkbox' || el.type === 'radio') return ' →click';
+            return ' →type';
+        }
+        if (el.tag === 'select') return ' →select';
+        if (el.tag === 'textarea') return ' →type';
+        if (el.isButton || el.tag === 'button' || el.role === 'button') return ' →click';
+        if (el.isLink || el.tag === 'a') return ' →click';
+        if (el.role === 'option' || el.role === 'listitem' || el.role === 'menuitem') return ' →click';
+        if (el.isCombobox) return ' →click/type';
+        if (el.isCalendarDay) return ' →click';
+        if (el.role === 'tab') return ' →click';
+        
+        return '';
     }
 
     private truncate(text: string, max: number): string {

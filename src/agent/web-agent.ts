@@ -1,4 +1,4 @@
-import { chromium, Browser, Page } from 'playwright';
+import { chromium, Browser, Page, BrowserContext } from 'playwright';
 import { OptimizedSnapshotExtractor, OptimizedSnapshot } from '../browser/optimized-snapshot.js';
 import { OptimizedOpenAIClient, BatchDecision } from './optimized-openai-client.js';
 import { BatchActionExecutor, BatchExecutionResult } from './batch-executor.js';
@@ -28,6 +28,7 @@ interface AgentResult {
     status: string;
     success: boolean;
     summary: string;
+    extractedSummary: string; // Resumen de información extraída
     totalSteps: number;
     duration: number;
     finalUrl: string;
@@ -41,6 +42,7 @@ interface AgentResult {
 
 export class WebAgent {
     private browser: Browser | null = null;
+    private context: BrowserContext | null = null;
     private page: Page | null = null;
 
     private snapshotExtractor: OptimizedSnapshotExtractor;
@@ -81,6 +83,7 @@ export class WebAgent {
         instruction: string;
         credentials?: { email?: string; username?: string; password?: string };
         flowName?: string;
+        context?: BrowserContext;
     }): Promise<AgentResult> {
         const startTime = Date.now();
 
@@ -116,16 +119,47 @@ export class WebAgent {
 
         try {
             // 1. Inicializar navegador
-            console.log('🚀 Iniciando agente optimizado (Phase 2)...');
-            this.browser = await chromium.launch({ headless: config.headless ?? false });
-            this.page = await this.browser.newPage();
+            if (params.context) {
+                console.log('🚀 Iniciando agente optimizado (Contexto compartido)...');
+                this.context = params.context;
+                // No asignamos this.browser para evitar cerrarlo al final
+            } else {
+                console.log('🚀 Iniciando agente optimizado (Nuevo navegador)...');
+                this.browser = await chromium.launch({ headless: config.headless ?? false });
+                this.context = await this.browser.newContext();
+            }
 
-            // 2. Navegar a URL inicial
+            this.page = await this.context.newPage();
+
+            // 2. Navegar a URL inicial con fallback de estrategias
             console.log(`🌐 Navegando a ${config.url}...`);
-            await this.page.goto(config.url, {
-                waitUntil: 'networkidle',
-                timeout: 60000
-            });
+            const waitStrategies: Array<{ strategy: 'domcontentloaded' | 'load' | 'networkidle' | 'commit'; timeout: number }> = [
+                { strategy: 'domcontentloaded', timeout: 20000 },
+                { strategy: 'load', timeout: 25000 },
+                { strategy: 'networkidle', timeout: 30000 },
+                { strategy: 'commit', timeout: 15000 }
+            ];
+
+            let navigationSuccess = false;
+            for (const { strategy, timeout } of waitStrategies) {
+                try {
+                    await this.page.goto(config.url, {
+                        waitUntil: strategy,
+                        timeout: timeout
+                    });
+                    console.log(`✅ Navegación exitosa (${strategy})`);
+                    navigationSuccess = true;
+                    break;
+                } catch (navError: any) {
+                    console.log(`⚠️ Estrategia '${strategy}' falló: ${navError.message?.slice(0, 50)}...`);
+                    // Continuar con la siguiente estrategia
+                }
+            }
+
+            if (!navigationSuccess) {
+                throw new Error(`No se pudo navegar a ${config.url} con ninguna estrategia`);
+            }
+
             console.log('⏳ Esperando estabilización...');
             await this.page.waitForTimeout(2000);
 
@@ -137,15 +171,28 @@ export class WebAgent {
             console.log('⏳ Esperando a que la página renderice contenido...');
             let warmedUp = false;
             for (let i = 0; i < 15; i++) {
-                const warmupSnapshot = await this.snapshotExtractor.extract(this.page);
-                if (warmupSnapshot.elements.length > 10) {
-                    console.log(`✅ Página lista: ${warmupSnapshot.elements.length} elementos detectados.`);
-                    warmedUp = true;
-                    break;
-                }
-                if (i === 5 || i === 10) {
-                    console.log('   ...scroll para despertar contenido...');
-                    await this.page.evaluate(() => window.scrollBy(0, 300));
+                try {
+                    // Esperar a que la navegación se estabilice
+                    await this.page.waitForLoadState('domcontentloaded').catch(() => { });
+
+                    const warmupSnapshot = await this.snapshotExtractor.extract(this.page);
+                    if (warmupSnapshot.elements.length > 10) {
+                        console.log(`✅ Página lista: ${warmupSnapshot.elements.length} elementos detectados.`);
+                        warmedUp = true;
+                        break;
+                    }
+                    if (i === 5 || i === 10) {
+                        console.log('   ...scroll para despertar contenido...');
+                        await this.page.evaluate(() => window.scrollBy(0, 300)).catch(() => { });
+                    }
+                } catch (e: any) {
+                    // Si el contexto fue destruido por navegación, esperar y reintentar
+                    if (e.message?.includes('context was destroyed') || e.message?.includes('navigation')) {
+                        console.log('   ...página navegando, esperando estabilización...');
+                        await this.page.waitForTimeout(2000);
+                        continue;
+                    }
+                    throw e;
                 }
                 await this.page.waitForTimeout(1000);
             }
@@ -170,7 +217,7 @@ export class WebAgent {
                 // Detectar página de pago
                 if (await this.isPaymentPage()) {
                     console.log('💳 PÁGINA DE PAGO DETECTADA - Deteniendo');
-                    return this.createResult('payment_detected', startTime);
+                    return this.createResult('payment_detected', startTime, config.objective);
                 }
 
                 // Tomar snapshot
@@ -187,9 +234,13 @@ export class WebAgent {
 
                 // Detectar si estamos atascados
                 if (this.stateManager.isStuck()) {
-                    console.log('⚠️ Detectado estado atascado, aplicando recuperación...');
-                    await this.applyRecoveryStrategies();
-                    continue;
+                    const shouldContinueRecovery = this.stateManager.recordRecoveryAttempt();
+                    if (shouldContinueRecovery) {
+                        console.log('⚠️ Detectado estado atascado, aplicando recuperación...');
+                        await this.applyRecoveryStrategies();
+                        continue;
+                    }
+                    // Si agotamos intentos de recuperación, continuamos al LLM para nueva estrategia
                 }
 
                 // Pedir decisión a OpenAI (Planificando Batch)
@@ -204,12 +255,79 @@ export class WebAgent {
 
                 console.log(`   🤔 "Thinking": ${decision.thinking}`);
 
+                // Registrar URL visitada
+                this.stateManager.addVisitedUrl(this.page!.url());
+
+                // Procesar información extraída del LLM
+                if (decision.extractedInfo && decision.extractedInfo.length > 0) {
+                    for (const info of decision.extractedInfo) {
+                        this.stateManager.addExtractedInfo({
+                            type: info.type,
+                            content: info.content,
+                            source: this.page!.url()
+                        });
+                        console.log(`   📝 Info extraída [${info.type}]: ${info.content}`);
+                    }
+                }
+
                 // Verificar si terminamos según el LLM
-                // Si la acción es 'done' o explícitamente isComplete
                 const doneAction = decision.actions.find(a => a.action === 'done');
-                if (doneAction || (decision.isComplete && decision.actions.length === 0)) {
-                    console.log('✅ Objetivo completado según el agente!');
-                    return this.createResult('success', startTime);
+
+                // SOLO terminar si hay una acción explícita de 'done'
+                if (doneAction) {
+                    const reason = doneAction.value || doneAction.why || 'Objetivo alcanzado';
+
+                    // Verificar si realmente tuvo éxito o falló
+                    const isFailure = reason.toLowerCase().includes('no encontr') ||
+                        reason.toLowerCase().includes('no pude') ||
+                        reason.toLowerCase().includes('imposible') ||
+                        reason.toLowerCase().includes('not found') ||
+                        reason.toLowerCase().includes('no_') ||
+                        reason.toLowerCase().includes('sin resultado');
+
+                    const extractedInfo = this.stateManager.getExtractedInfo();
+                    const hasProductInfo = extractedInfo.some(i => ['result', 'product', 'producto'].includes(i.type));
+                    const hasPrice = extractedInfo.some(i => i.type === 'price' || i.type === 'precio');
+                    const looksLikePriceNotFound = /precio|price/.test(reason.toLowerCase());
+
+                    if (isFailure && looksLikePriceNotFound && hasProductInfo && !hasPrice) {
+                        console.log(`   📜 Página de producto sin precio visible - haciendo scroll y esperando antes de rendirse...`);
+                        await this.page.evaluate(() => window.scrollBy(0, 600));
+                        await this.page.waitForTimeout(2500);
+                        continue;
+                    }
+
+                    const currentStep = this.stateManager.getState().currentStep;
+                    const maxSteps = this.stateManager.getState().maxSteps;
+                    const MIN_STEPS_BEFORE_GIVE_UP = 15; // Mínimo de pasos antes de permitir rendirse
+
+                    // Si es un "fallo" pero aún tenemos muchos pasos, forzar a seguir intentando
+                    if (isFailure && currentStep < MIN_STEPS_BEFORE_GIVE_UP && currentStep < maxSteps * 0.5) {
+                        console.log(`⚠️ Agente quiere rendirse (${reason}) pero solo llevamos ${currentStep} pasos - forzando más intentos...`);
+
+                        // Forzar scroll y búsqueda alternativa
+                        await this.page.evaluate(() => window.scrollBy(0, 500));
+                        await this.page.waitForTimeout(1000);
+
+                        // Actualizar lastResult para que el LLM sepa que debe intentar algo diferente
+                        lastResult = {
+                            success: false,
+                            error: `NO TE RINDAS: ${reason}. Intenta otra estrategia: busca "mexican", "tacos", "tex-mex", usa filtros, explora categorías.`,
+                            suggestion: 'Prueba términos de búsqueda alternativos o navega por categorías'
+                        };
+                        continue;
+                    }
+
+                    console.log(`✅ Agente terminó: ${reason}`);
+                    return this.createResult(isFailure ? 'failed' : 'success', startTime, config.objective);
+                }
+
+                // Si isComplete pero sin acciones, NO es éxito - forzar scroll
+                if (decision.isComplete && decision.actions.length === 0) {
+                    console.log('⚠️ Modelo indeciso - forzando exploración...');
+                    await this.page.evaluate(() => window.scrollBy(0, 400));
+                    await this.page.waitForTimeout(1500);
+                    continue;
                 }
 
                 // Ejecutar Batch de acciones
@@ -223,8 +341,15 @@ export class WebAgent {
                     this.page,
                     decision,
                     snapshot,
-                    this.siteAdapter
+                    this.siteAdapter,
+                    this.context!
                 );
+
+                // Si se abrió una nueva pestaña, actualizar la referencia
+                if (batchResult.newPage) {
+                    console.log(`   📑 Cambiando a nueva pestaña: ${batchResult.newPage.url()}`);
+                    this.page = batchResult.newPage;
+                }
 
                 // Registrar resultados en StateManager
                 for (const res of batchResult.results) {
@@ -251,17 +376,19 @@ export class WebAgent {
                     console.log(`   ⛔ Batch detenido: ${lastResult.error}`);
                 } else {
                     lastResult = { success: true };
+                    // Resetear estado de atascado cuando hay progreso real
+                    this.stateManager.resetStuckState();
                 }
 
                 // Breve pausa para estabilidad
                 await this.page.waitForTimeout(1000);
             }
 
-            return this.createResult('max_steps_reached', startTime);
+            return this.createResult('max_steps_reached', startTime, config.objective);
 
         } catch (error) {
             console.error('❌ Error fatal:', error);
-            return this.createResult('error', startTime, error as Error);
+            return this.createResult('error', startTime, config.objective, error as Error);
 
         } finally {
             await this.cleanup();
@@ -298,21 +425,28 @@ export class WebAgent {
     private createResult(
         status: string,
         startTime: number,
+        objective: string,
         error?: Error
     ): AgentResult {
         const duration = Date.now() - startTime;
         const steps = this.stateManager.getState().currentStep;
+
+        // Generar resumen de información extraída
+        const extractedSummary = this.stateManager.generateFinalSummary(objective, status);
+        console.log(extractedSummary);
+
         return {
             status,
             success: status === 'success' || status === 'payment_detected',
             summary: `Status: ${status} - ${error?.message || 'Completed'}`,
+            extractedSummary,
             totalSteps: steps,
             duration: duration,
             finalUrl: this.page?.url() || '',
             error: error?.message,
             // Compatibility fields
             steps: this.stateManager.getState().executedActions,
-            data: {},
+            data: this.stateManager.getExtractedInfo(),
             downloadedFiles: [],
             flowId: this.config.recordFlow ? `flow-${Date.now()}` : undefined
         };
@@ -321,6 +455,9 @@ export class WebAgent {
     private async cleanup(): Promise<void> {
         if (this.browser) {
             await this.browser.close();
+        } else if (this.page) {
+            // Si no somos dueños del browser, al menos cerramos la página
+            await this.page.close().catch(() => { });
         }
     }
 }
