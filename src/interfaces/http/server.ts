@@ -1094,17 +1094,22 @@ export function createApiServer(config: {
         const PWA_URL = 'https://pwa-cayacoa.netlify.app/'; // ✅ Tu PWA en Netlify
         
         if (USAR_PWA) {
-            // Extraer booking de la URL de destino
-            const bookingMatch = targetUrl.match(/make-booking\/([^/]+)/);
+            // Extraer booking COMPLETO de la URL de destino (ej: 620am/03022026)
+            const bookingMatch = targetUrl.match(/make-booking\/(.+?)(?:\?|$)/);
             if (bookingMatch) {
-                const bookingParam = bookingMatch[1];
+                const bookingParam = bookingMatch[1].replace(/\/$/, ''); // Quitar trailing slash
                 
-                // Codificar credenciales en base64 para incluirlas en la URL
+                // Codificar credenciales en base64 URL-safe para incluirlas en la URL
                 const credentialsJson = JSON.stringify({
                     email: credentials.username,
                     password: credentials.password
                 });
-                const credentialsEncoded = Buffer.from(credentialsJson).toString('base64');
+                // Usar base64 URL-safe (reemplazar +/= con caracteres seguros para URLs)
+                const base64 = Buffer.from(credentialsJson).toString('base64');
+                const credentialsEncoded = base64
+                    .replace(/\+/g, '-')  // + → -
+                    .replace(/\//g, '_')  // / → _
+                    .replace(/=/g, '');   // quitar padding =
                 
                 console.log(`   🔀 Redirigiendo a PWA con booking: ${bookingParam}`);
                 console.log(`   🔐 Credenciales incluidas en URL (encriptadas)`);

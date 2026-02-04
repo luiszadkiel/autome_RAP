@@ -75,7 +75,7 @@ export class WebAgent {
     /**
      * Detect if current page is a payment/checkout page
      */
-    private detectPaymentPage(url: string, elements: { role: string; name: string }[]): {
+    private detectPaymentPage(url: string, elements: { role: string; name: string; selector?: string }[]): {
         isPaymentPage: boolean;
         reservationInfo: {
             date?: string;
@@ -85,8 +85,12 @@ export class WebAgent {
         };
     } {
         const urlLower = url.toLowerCase();
-        const elementNames = elements.map(e => (e.name || '').toLowerCase());
+        // Normalizar espacios múltiples y saltos de línea en los nombres
+        const elementNames = elements.map(e => (e.name || '').toLowerCase().replace(/\s+/g, ' ').trim());
         const elementNamesJoined = elementNames.join(' ');
+        
+        // Extraer IDs y clases de los selectores para detección adicional
+        const selectors = elements.map(e => (e.selector || '').toLowerCase()).join(' ');
 
         // Check URL patterns for payment/checkout pages
         const paymentUrlPatterns = [
@@ -103,20 +107,76 @@ export class WebAgent {
         const isPaymentUrl = paymentUrlPatterns.some(pattern => urlLower.includes(pattern));
 
         // Check for payment-related elements
+        // Patrones genéricos que funcionan con cualquier sitio web
         const paymentElementPatterns = [
+            // Botones de acción
             'procesar pago',
-            'procesar',
-            'pagar',
-            'confirmar reserva',
-            'confirmar compra',
-            'completar pedido',
-            'finalizar',
             'realizar pago',
-            'elegir producto'
+            'pagar',
+            'pay',
+            'checkout',
+            'confirmar',
+            'confirm',
+            'completar',
+            'complete',
+            'finalizar',
+            'finish',
+            'submit',
+            'place order',
+            'buy now',
+            'comprar',
+            'reservar',
+            'book now',
+            // Información de resumen
+            'total',
+            'subtotal',
+            'summary',
+            'resumen',
+            'order details',
+            'detalle',
+            // Métodos de pago
+            'payment method',
+            'método de pago',
+            'credit card',
+            'tarjeta',
+            'paypal',
+            'billing'
         ];
 
         const hasPaymentElements = paymentElementPatterns.some(pattern =>
             elementNamesJoined.includes(pattern)
+        );
+        
+        // Patrones de ID y clases que indican página de pago/confirmación
+        // Esto detecta elementos como id="pay", class="checkout-btn", etc.
+        const paymentSelectorPatterns = [
+            '#pay',           // id="pay"
+            '#payment',       // id="payment"
+            '#checkout',      // id="checkout"
+            '#confirm',       // id="confirm"
+            '#submit',        // id="submit"
+            '#order',         // id="order"
+            '#purchase',      // id="purchase"
+            '#buy',           // id="buy"
+            '#reserve',       // id="reserve"
+            '#book',          // id="book"
+            '.pay',           // class contiene "pay"
+            '.payment',       // class contiene "payment"
+            '.checkout',      // class contiene "checkout"
+            '.confirm',       // class contiene "confirm"
+            '.purchase',      // class contiene "purchase"
+            '.buy-',          // class contiene "buy-"
+            '.reserve',       // class contiene "reserve"
+            '.booking',       // class contiene "booking"
+            'btn-pay',        // class="btn-pay"
+            'btn-checkout',   // class="btn-checkout"
+            'btn-confirm',    // class="btn-confirm"
+            'submit-order',   // class="submit-order"
+            'place-order',    // class="place-order"
+        ];
+        
+        const hasPaymentSelectors = paymentSelectorPatterns.some(pattern =>
+            selectors.includes(pattern)
         );
 
         // Extract reservation info from elements
@@ -168,8 +228,24 @@ export class WebAgent {
             reservationInfo.date = `${dateStr.slice(0, 2)}/${dateStr.slice(2, 4)}/${dateStr.slice(4)}`;
         }
 
+        // DETECCIÓN GENÉRICA DE PÁGINA DE PAGO/CONFIRMACIÓN
+        // Funciona con cualquier sitio web, no específico de una página
+        
+        // Es página de pago si tiene URL de pago Y (elementos de pago O selectores de pago)
+        const isRealPaymentPage = isPaymentUrl && (hasPaymentElements || hasPaymentSelectors);
+        
+        // Debug logging
+        if (isPaymentUrl) {
+            console.log(`   📊 Detección de página de pago:`);
+            console.log(`      - URL de pago: ✅`);
+            console.log(`      - Elementos: ${elements.length}`);
+            console.log(`      - Texto de pago: ${hasPaymentElements ? '✅' : '❌'}`);
+            console.log(`      - ID/Class de pago: ${hasPaymentSelectors ? '✅' : '❌'}`);
+            console.log(`      - ¿Detener? ${isRealPaymentPage ? '✅ SÍ' : '❌ NO'}`);
+        }
+        
         return {
-            isPaymentPage: isPaymentUrl || hasPaymentElements,
+            isPaymentPage: isRealPaymentPage,
             reservationInfo
         };
     }
@@ -512,7 +588,11 @@ export class WebAgent {
                     const currentUrl = this.browser.getUrl();
                     const paymentDetection = this.detectPaymentPage(
                         currentUrl,
-                        snapshot.elements.map(e => ({ role: e.role, name: e.name }))
+                        snapshot.elements.map(e => ({ 
+                            role: e.role, 
+                            name: e.name,
+                            selector: e.selector || ''  // Incluir selector para detectar IDs y clases
+                        }))
                     );
 
                     // Solo detener para RESERVACIONES/COMPRAS, no para búsquedas generales
