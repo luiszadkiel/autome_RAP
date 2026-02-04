@@ -347,9 +347,14 @@ export class ActionVerifier {
                 break;
 
             case 'type':
-                if (evidence.targetElementChanged) {
+                // Check value change OR significant DOM change (like dropdown opening)
+                if (evidence.targetElementChanged || evidence.newElementsAppeared || evidence.domChanged) {
                     confidence += 35;
-                    reasons.push('El campo de texto fue actualizado');
+                    reasons.push('Input actualizado o cambios en UI detectados');
+                } else if (!evidence.errorsDetected.length) {
+                    // Fallback: Si no hay error y no cambió nada, quizás es un input raro (shadow dom, canvas, etc)
+                    confidence += 10;
+                    reasons.push('No se detectaron cambios pero tampoco errores (Silent Success?)');
                 } else {
                     confidence -= 25;
                     reasons.push('El texto no parece haberse ingresado');

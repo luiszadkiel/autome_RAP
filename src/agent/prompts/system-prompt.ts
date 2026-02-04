@@ -3,23 +3,23 @@ import { OptimizedSnapshot } from '../../browser/optimized-snapshot.js';
 
 // Interfaces for prompt construction
 export interface ActionHistory {
-    action: string;
-    ref?: string;
-    success: boolean;
-    reason?: string;
-    timestamp: number;
+  action: string;
+  ref?: string;
+  success: boolean;
+  reason?: string;
+  timestamp: number;
 }
 
 export interface ActionResult {
-    success: boolean;
-    error?: string;
-    suggestion?: string;
+  success: boolean;
+  error?: string;
+  suggestion?: string;
 }
 
 export interface StructuredData {
-    date?: { formatted: string; day: number; month: number; year: number };
-    time?: { formatted: string; hour: number; minute: number; period: string };
-    credentials?: { email?: string; password?: string };
+  date?: { formatted: string; day: number; month: number; year: number };
+  time?: { formatted: string; hour: number; minute: number; period: string };
+  credentials?: { email?: string; password?: string };
 }
 
 export const SYSTEM_PROMPT = `Eres un agente de automatización web experto. Tu objetivo es completar tareas de reservación/compra en sitios web.
@@ -66,9 +66,18 @@ export const SYSTEM_PROMPT = `Eres un agente de automatización web experto. Tu 
 - Si no encuentras el elemento esperado, usa scroll
 
 ### Cuándo terminar:
-- "done" cuando el OBJETIVO esté completado
-- "done" con isComplete:false si estás BLOQUEADO
+- "done" SOLO cuando el OBJETIVO esté inequivocamente completado
+- "done" con isComplete:false si estás COMPLETAMENTE BLOQUEADO
 - Si ves página de PAGO → done con reason "payment_page_detected"
+- JAMÁS digas "done" si la última acción falló. Intenta el siguiente paso lógico o una alternativa.
+
+### Manejo de Fallos:
+- Si una acción falla, NO te rindas inmediatamente.
+- Intenta:
+  1. Scroll para visualizar mejor
+  2. Un selector alternativo
+  3. Esperar (action: wait) si parece carga
+- Solo si fallas 3 veces seguidas en lo mismo -> done(fail)
 
 ## EJEMPLOS
 
@@ -138,79 +147,79 @@ Respuesta:
 // ============================================
 
 export function buildUserPrompt(params: {
-    snapshotFormatted: string;
-    snapshotRaw: OptimizedSnapshot;
-    objective: string;
-    structuredData: StructuredData;
-    history: ActionHistory[];
-    lastResult?: ActionResult;
-    currentUrl: string;
+  snapshotFormatted: string;
+  snapshotRaw: OptimizedSnapshot;
+  objective: string;
+  structuredData: StructuredData;
+  history: ActionHistory[];
+  lastResult?: ActionResult;
+  currentUrl: string;
 }): string {
-    const { snapshotFormatted, snapshotRaw, objective, structuredData, history, lastResult, currentUrl } = params;
+  const { snapshotFormatted, snapshotRaw, objective, structuredData, history, lastResult, currentUrl } = params;
 
-    let prompt = `## OBJETIVO
+  let prompt = `## OBJETIVO
 ${objective}
 
 ## DATOS EXTRAÍDOS
 `;
 
-    // Agregar datos estructurados de forma compacta
-    if (structuredData.date) {
-        prompt += `- 📅 Fecha: ${structuredData.date.formatted} (día ${structuredData.date.day})\n`;
-    }
-    if (structuredData.time) {
-        prompt += `- 🕐 Hora: ${structuredData.time.formatted}\n`;
-    }
-    if (structuredData.credentials?.email) {
-        prompt += `- 👤 Email: ${structuredData.credentials.email}\n`;
-        prompt += `- 🔑 Password: [DISPONIBLE]\n`;
-    }
+  // Agregar datos estructurados de forma compacta
+  if (structuredData.date) {
+    prompt += `- 📅 Fecha: ${structuredData.date.formatted} (día ${structuredData.date.day})\n`;
+  }
+  if (structuredData.time) {
+    prompt += `- 🕐 Hora: ${structuredData.time.formatted}\n`;
+  }
+  if (structuredData.credentials?.email) {
+    prompt += `- 👤 Email: ${structuredData.credentials.email}\n`;
+    prompt += `- 🔑 Password: [DISPONIBLE]\n`;
+  }
 
-    prompt += `\n## ESTADO ACTUAL
+  prompt += `\n## ESTADO ACTUAL
 - URL: ${currentUrl}
 - Paso: ${history.length + 1}
 `;
 
-    // Agregar historial reciente (últimas 3 acciones)
-    if (history.length > 0) {
-        prompt += `\n## HISTORIAL RECIENTE\n`;
-        const recent = history.slice(-3);
-        recent.forEach((h) => {
-            const status = h.success ? '✓' : '✗';
-            prompt += `${status} ${h.action}${h.ref ? `[${h.ref}]` : ''}: ${h.reason || ''}\n`;
-        });
-    }
+  // Agregar historial reciente (últimas 3 acciones)
+  if (history.length > 0) {
+    prompt += `\n## HISTORIAL RECIENTE\n`;
+    const recent = history.slice(-3);
+    recent.forEach((h) => {
+      const status = h.success ? '✓' : '✗';
+      prompt += `${status} ${h.action}${h.ref ? `[${h.ref}]` : ''}: ${h.reason || ''}\n`;
+    });
+  }
 
-    // Agregar resultado de última acción si falló
-    if (lastResult && !lastResult.success) {
-        prompt += `\n## ⚠️ ÚLTIMA ACCIÓN FALLÓ
+  // Agregar resultado de última acción si falló
+  if (lastResult && !lastResult.success) {
+    prompt += `\n## ⚠️ ÚLTIMA ACCIÓN FALLÓ
 - Razón: ${lastResult.error}
 - Sugerencia: ${lastResult.suggestion || 'Intentar alternativa'}
 `;
-    }
+  }
 
-    // Agregar estado de la página
-    prompt += `\n## ESTADO DE PÁGINA\n`;
+  // Agregar estado de la página
+  prompt += `\n## ESTADO DE PÁGINA\n`;
 
-    if (snapshotRaw.pageState.hasModal) {
-        prompt += `🔴 MODAL ACTIVO: "${snapshotRaw.pageState.modalInfo?.title || 'Unknown'}"
+  if (snapshotRaw.pageState.hasModal) {
+    prompt += `🔴 MODAL ACTIVO: "${snapshotRaw.pageState.modalInfo?.title || 'Unknown'}"
    Botones: ${snapshotRaw.pageState.modalInfo?.buttons.join(', ') || 'Unknown'}
    ⚡ DEBES INTERACTUAR CON EL MODAL PRIMERO\n\n`;
-    }
+  }
 
-    if (snapshotRaw.pageState.errorMessages.length > 0) {
-        prompt += `❌ ERRORES VISIBLES:\n`;
-        snapshotRaw.pageState.errorMessages.forEach(e => prompt += `   - ${e}\n`);
-        prompt += '\n';
-    }
+  if (snapshotRaw.pageState.errorMessages.length > 0) {
+    prompt += `❌ ERRORES VISIBLES:\n`;
+    snapshotRaw.pageState.errorMessages.forEach(e => prompt += `   - ${e}\n`);
+    prompt += '\n';
+  }
 
-    if (snapshotRaw.pageState.isLoading) {
-        prompt += `⏳ PÁGINA CARGANDO - considera usar "wait"\n\n`;
-    }
+  if (snapshotRaw.pageState.isLoading) {
+    prompt += `⏳ PÁGINA CARGANDO - considera usar "wait"\n\n`;
+  }
 
-    // Agregar elementos formateados
-    prompt += `## ELEMENTOS INTERACTIVOS\n`;
-    prompt += snapshotFormatted;
+  // Agregar elementos formateados
+  prompt += `## ELEMENTOS INTERACTIVOS\n`;
+  prompt += snapshotFormatted;
 
-    return prompt;
+  return prompt;
 }

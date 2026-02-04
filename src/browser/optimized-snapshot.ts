@@ -160,6 +160,10 @@ export class OptimizedSnapshotExtractor {
                 '[data-bs-toggle]',
                 '[data-action]',
                 '[data-click]',
+                '[data-test]',
+                '[data-testid]',
+                '[data-qa]',
+                '[data-automation]',
 
                 // Heurísticas específicas anteriores
                 '[class*="option"]',
@@ -226,7 +230,7 @@ export class OptimizedSnapshotExtractor {
                     // No, usually hidden text shouldn't be clicked.
 
                     // Truncar textos largos
-                    if (text.length > 60) text = text.slice(0, 57) + '...';
+                    if (text.length > 100) text = text.slice(0, 97) + '...';
                 }
 
                 // Skip elements with no text and no specific interactive traits (unless it's an input/button with other attrs)
@@ -360,7 +364,7 @@ export class OptimizedSnapshotExtractor {
                 elements.push(element);
 
                 // Límite de elementos para evitar snapshots enormes
-                if (elements.length >= 500) break;
+                if (elements.length >= 800) break;
             }
 
             // === Detectar estado de la página ===

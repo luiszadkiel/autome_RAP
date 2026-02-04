@@ -122,17 +122,44 @@ export class WebAgent {
 
             // 2. Navegar a URL inicial
             console.log(`🌐 Navegando a ${config.url}...`);
-            await this.page.goto(config.url, { waitUntil: 'load' });
-            try { await this.page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => { }); } catch { }
+            await this.page.goto(config.url, {
+                waitUntil: 'networkidle',
+                timeout: 60000
+            });
+            console.log('⏳ Esperando estabilización...');
+            await this.page.waitForTimeout(2000);
 
             // 3. Seleccionar adaptador de sitio
             this.siteAdapter = AdapterFactory.getAdapter(config.url);
             console.log(`🔌 Usando adaptador: ${this.siteAdapter.name}`);
 
-            // 4. Loop principal
+            // 4. Esperar a que la página tenga contenido real (Warm-up)
+            console.log('⏳ Esperando a que la página renderice contenido...');
+            let warmedUp = false;
+            for (let i = 0; i < 15; i++) {
+                const warmupSnapshot = await this.snapshotExtractor.extract(this.page);
+                if (warmupSnapshot.elements.length > 10) {
+                    console.log(`✅ Página lista: ${warmupSnapshot.elements.length} elementos detectados.`);
+                    warmedUp = true;
+                    break;
+                }
+                if (i === 5 || i === 10) {
+                    console.log('   ...scroll para despertar contenido...');
+                    await this.page.evaluate(() => window.scrollBy(0, 300));
+                }
+                await this.page.waitForTimeout(1000);
+            }
+
+            if (!warmedUp) {
+                console.warn('⚠️ Advertencia: Warm-up no detectó suficientes elementos, continuando de todos modos...');
+            }
+
+            // 5. Loop principal
             let lastResult: { success: boolean; error?: string; suggestion?: string } | undefined;
 
             while (true) {
+                await this.page.waitForLoadState('domcontentloaded').catch(() => { });
+
                 // Verificar si debemos detenernos (por límites)
                 const stopCheck = this.stateManager.shouldStop();
                 if (stopCheck.stop) {
@@ -148,7 +175,14 @@ export class WebAgent {
 
                 // Tomar snapshot
                 console.log(`\n📍 Paso ${this.stateManager.getState().currentStep + 1}`);
-                const snapshot = await this.snapshotExtractor.extract(this.page);
+                let snapshot = await this.snapshotExtractor.extract(this.page);
+
+                if (snapshot.elements.length === 0) {
+                    console.log('   ⚠️ Snapshot vacío, esperando 2s...');
+                    await this.page.waitForTimeout(2000);
+                    snapshot = await this.snapshotExtractor.extract(this.page);
+                }
+
                 console.log(`   📸 ${snapshot.meta.elementCount} elementos (${snapshot.meta.extractionTimeMs}ms)`);
 
                 // Detectar si estamos atascados
@@ -179,6 +213,12 @@ export class WebAgent {
                 }
 
                 // Ejecutar Batch de acciones
+                if (decision.actions.length === 0 && !decision.isComplete) {
+                    console.log('   ⚠️ No hay acciones generadas, reintentando...');
+                    await this.page.waitForTimeout(1000);
+                    continue;
+                }
+
                 const batchResult = await this.batchExecutor.executeBatch(
                     this.page,
                     decision,
@@ -214,7 +254,7 @@ export class WebAgent {
                 }
 
                 // Breve pausa para estabilidad
-                await this.page.waitForTimeout(500);
+                await this.page.waitForTimeout(1000);
             }
 
             return this.createResult('max_steps_reached', startTime);

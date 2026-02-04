@@ -126,7 +126,47 @@ export class BatchActionExecutor {
         switch (action.action) {
             case 'click':
                 if (!locator) throw new Error('Click requiere referencia válida');
-                await locator.click({ timeout: 5000 });
+                try {
+                    await locator.click({ timeout: 5000 });
+                } catch (clickError) {
+                    const errorMsg = (clickError as Error).message;
+                    // Detectar si hay un elemento interceptando (modal, overlay, popup)
+                    if (errorMsg.includes('intercepts pointer events')) {
+                        console.log('   🔄 Overlay detectado, intentando cerrar...');
+                        
+                        // Estrategia 1: Presionar Escape
+                        await page.keyboard.press('Escape');
+                        await page.waitForTimeout(300);
+                        
+                        // Estrategia 2: Buscar y clickear botón de cerrar si existe
+                        const closeSelectors = [
+                            'button[aria-label="cerrar"]',
+                            'button[aria-label="close"]',
+                            'button[title="cerrar"]',
+                            'button[title="close"]',
+                            '[data-testid="close-button"]',
+                            '.close-button',
+                            '.modal-close'
+                        ];
+                        
+                        for (const selector of closeSelectors) {
+                            try {
+                                const closeBtn = page.locator(selector).first();
+                                if (await closeBtn.isVisible({ timeout: 500 })) {
+                                    await closeBtn.click({ timeout: 1000 });
+                                    await page.waitForTimeout(300);
+                                    break;
+                                }
+                            } catch { /* continuar con siguiente selector */ }
+                        }
+                        
+                        // Reintentar click original
+                        await page.waitForTimeout(500);
+                        await locator.click({ timeout: 5000 });
+                    } else {
+                        throw clickError;
+                    }
+                }
                 break;
 
             case 'type':
