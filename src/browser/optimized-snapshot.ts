@@ -20,12 +20,28 @@ export interface OptimizedElement {
     isFocused?: boolean;
     isReadonly?: boolean;
     isInvalid?: boolean;
+    isPressed?: boolean;
+    isCurrentDate?: boolean;
+    isCalendarDay?: boolean;
+    isCombobox?: boolean;
+    hasPopup?: string;
+    controls?: string;
     label?: string;
+
+    // Select specific
+    selectedIndex?: number;
+    selectedText?: string;
+    totalOptions?: number;
+
+    // Input/Combobox specific
+    inputValue?: string;
+
     rect: { x: number; y: number; w: number; h: number };
     // Para matching robusto
     testId?: string;
     name?: string;
     className?: string;
+    id?: string;
 }
 
 export interface OptimizedSnapshot {
@@ -263,6 +279,41 @@ export class OptimizedSnapshotExtractor {
                     ((el as any).willValidate && !(el as any).validity.valid);
                 if (invalid) element.isInvalid = true;
 
+                // ID Capture
+                if (el.id) element.id = el.id;
+
+                // Specialized ARIA State
+                const pressed = el.getAttribute('aria-pressed');
+                if (pressed === 'true') element.isPressed = true;
+
+                const current = el.getAttribute('aria-current');
+                if (current) element.isCurrentDate = true;
+
+                const controls = el.getAttribute('aria-controls');
+                if (controls) element.controls = controls;
+
+                const hasPopup = el.getAttribute('aria-haspopup');
+                if (hasPopup) element.hasPopup = hasPopup;
+
+                // Calendar Heuristics
+                if (el.getAttribute('name') === 'day' || (el.getAttribute('role') === 'gridcell' && !isNaN(Number(text)))) {
+                    element.isCalendarDay = true;
+                }
+
+                // Combobox & Input Logic
+                if (el.getAttribute('role') === 'combobox') {
+                    element.isCombobox = true;
+                    // Try to find associated input value if this is a wrapper
+                    const input = el.querySelector('input');
+                    if (input instanceof HTMLInputElement) {
+                        element.inputValue = input.value;
+                    }
+                }
+
+                if (el instanceof HTMLInputElement) {
+                    element.inputValue = el.value;
+                }
+
                 // Try to find label
                 if (el.id) {
                     const label = document.querySelector(`label[for="${el.id}"]`);
@@ -283,8 +334,13 @@ export class OptimizedSnapshotExtractor {
                     if (el.name) element.name = el.name;
                 }
 
-                if (el instanceof HTMLSelectElement && el.selectedIndex >= 0) {
-                    element.value = el.options[el.selectedIndex]?.text?.slice(0, 30);
+                if (el instanceof HTMLSelectElement) {
+                    if (el.selectedIndex >= 0) {
+                        element.value = el.options[el.selectedIndex]?.text?.slice(0, 30);
+                        element.selectedText = el.options[el.selectedIndex]?.text?.slice(0, 50);
+                        element.selectedIndex = el.selectedIndex;
+                    }
+                    element.totalOptions = el.options.length;
                 }
 
                 const ariaLabel = el.getAttribute('aria-label');
@@ -293,7 +349,7 @@ export class OptimizedSnapshotExtractor {
                 const role = el.getAttribute('role');
                 if (role) element.role = role;
 
-                const testId = el.getAttribute('data-testid') || el.getAttribute('data-test-id');
+                const testId = el.getAttribute('data-testid') || el.getAttribute('data-test-id') || el.getAttribute('data-test');
                 if (testId) element.testId = testId;
 
                 // Classname helpful for debugging or heuristic matching

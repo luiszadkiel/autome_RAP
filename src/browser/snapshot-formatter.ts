@@ -144,10 +144,31 @@ export class SnapshotFormatter {
             line += ` [val="${this.truncate(el.value, 20)}"]`;
         }
 
+        // Specialized displays
+        if (el.isCombobox) {
+            line += ` 🔽CBX${el.inputValue ? `=[${this.truncate(el.inputValue, 20)}]` : ''}`;
+        }
+        if (el.isCalendarDay) {
+            line += ` 📅DAY`;
+            if (el.isCurrentDate) line += '(TODAY)';
+        }
+        if (el.selectedText && el.tag === 'select') {
+            line += ` 📝SEL="${this.truncate(el.selectedText, 30)}"`;
+        }
+
         // Add important states
         if (el.isDisabled) line += ' ⛔DISABLED';
-        // if (el.isRequired) line += ' *REQ'; // Not present in OptimizedElement interface yet
-        // if (el.isSelected) line += ' ✓SEL'; // Not present in OptimizedElement interface yet
+        if (el.isExpanded) line += ' 📂EXPANDED';
+        if (el.isSelected) line += ' ✅SELECTED';
+        if (el.isRequired) line += ' *REQ';
+        if (el.isFocused) line += ' 🎯FOCUSED';
+        if (el.isReadonly) line += ' 🔒READONLY';
+        if (el.isInvalid) line += ' ⚠️INVALID';
+
+        // Add label if present (very helpful for context)
+        if (el.label) {
+            line += ` lbl="${this.truncate(el.label, 30)}"`;
+        }
 
         return line;
     }

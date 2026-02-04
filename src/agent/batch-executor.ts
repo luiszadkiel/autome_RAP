@@ -184,27 +184,50 @@ export class BatchActionExecutor {
         // Tiempos base
         const baseWait = 300;
 
-        // Ajustes por tipo
-        switch (action.action) {
-            case 'click':
-                await page.waitForTimeout(baseWait);
-                // Si el click provocó navegación, esperar network idle
-                try {
-                    await page.waitForLoadState('networkidle', { timeout: 2000 }).catch(() => { });
-                } catch { }
-                break;
+        // Estrategia de espera basada en el tipo de acción
+        if (action.action === 'type' || action.action === 'click') {
+            try {
+                // Esperar a que el DOM se estabilice (silencio de mutaciones)
+                await page.evaluate(() => {
+                    return new Promise<void>((resolve) => {
+                        let timeout: any;
+                        const observer = new MutationObserver(() => {
+                            clearTimeout(timeout);
+                            // Reiniciar temporizador si hubo cambios
+                            timeout = setTimeout(() => {
+                                observer.disconnect();
+                                resolve();
+                            }, 500); // 500ms de silencio requerido
+                        });
 
-            case 'type':
-                // Rápido
-                await page.waitForTimeout(100);
-                break;
+                        observer.observe(document.body, {
+                            childList: true,
+                            subtree: true,
+                            attributes: true,
+                            attributeFilter: ['class', 'style', 'aria-expanded', 'hidden']
+                        });
 
-            case 'done':
-                // Nada
-                break;
+                        // Timeout de seguridad máximo por si la página tiene animaciones infinitas
+                        setTimeout(() => {
+                            observer.disconnect();
+                            resolve();
+                        }, 2000);
+                    });
+                });
+            } catch (e) {
+                // Fallback seguro si falla el observer
+                await page.waitForTimeout(1000);
+            }
+        } else {
+            // Para otras acciones (scroll, etc), espera simple
+            await page.waitForTimeout(baseWait);
+        }
 
-            default:
-                await page.waitForTimeout(baseWait);
+        // Si fue un click, dar un extra por si hay redirección
+        if (action.action === 'click') {
+            try {
+                await page.waitForLoadState('networkidle', { timeout: 2000 }).catch(() => { });
+            } catch { }
         }
     }
 }
