@@ -14,6 +14,13 @@ export interface OptimizedElement {
     isLink: boolean;
     isDisabled: boolean;
     isVisible: boolean;
+    isExpanded?: boolean;
+    isSelected?: boolean;
+    isRequired?: boolean;
+    isFocused?: boolean;
+    isReadonly?: boolean;
+    isInvalid?: boolean;
+    label?: string;
     rect: { x: number; y: number; w: number; h: number };
     // Para matching robusto
     testId?: string;
@@ -75,20 +82,75 @@ export class OptimizedSnapshotExtractor {
                 'input:not([type="hidden"]):not([disabled])',
                 'select:not([disabled])',
                 'textarea:not([disabled])',
-                // Media prioridad - elementos clickeables
+                // Media prioridad - elementos clickeables y partes de menú
                 'a[href]',
                 '[role="button"]:not([disabled])',
                 '[role="link"]',
                 '[role="tab"]',
                 '[role="menuitem"]',
                 '[role="option"]',
-                // Baja prioridad - otros interactivos
+                '[role="listbox"]',
+                '[role="combobox"]',
+                '[role="searchbox"]',
+                '[role="textbox"]',
+                '[role="treeitem"]',
+                '[role="gridcell"]',
+                '[role="switch"]',
+                '[role="checkbox"]',
+                '[role="radio"]',
+                '[role="slider"]',
+                'li',
+                'dt', 'dd',
+
+                // Elementos HTML5 Interactivos y Semánticos
+                '[contenteditable="true"]',
+                'details',
+                'summary',
+                'audio[controls]',
+                'video[controls]',
+                'iframe', 'embed',
+
+                // Atributos de Estado y Accesibilidad (Alta probabilidad de interactividad)
+                '[aria-expanded="true"]',      // Menús abiertos
+                '[aria-haspopup]',
+                '[aria-controls]',
+                '[draggable="true"]',
+
+                // Baja prioridad - Eventos y Tabindex
                 '[onclick]',
-                '[tabindex="0"]',
+                '[onmousedown]', '[onmouseup]',
+                '[ontouchstart]',
+                '[onkeydown]',
+                '[tabindex]:not([tabindex="-1"])',
                 'label[for]',
                 '.btn', '.button',
+
+                // Heurísticas de Clases (Probabilidad Media)
+                '[class*="dropdown"]',
+                '[class*="toggle"]',
+                '[class*="close"]',
+                '[class*="modal"]',
+                '[class*="nav"]',
+                '[class*="link"]',
+                '[class*="card"]',
+                '[class*="select"]',
+                '[class*="search"]',
                 '[class*="clickable"]',
-                '[data-action]'
+
+                // Data Attributes (Common Frameworks)
+                '[data-toggle]',
+                '[data-target]',
+                '[data-dismiss]',
+                '[data-bs-toggle]',
+                '[data-action]',
+                '[data-click]',
+
+                // Heurísticas específicas anteriores
+                '[class*="option"]',
+                '[class*="item"]',
+                '[class*="result"]',
+                '[class*="menu"]',
+                '[class*="suggestion"]'
             ];
 
             const seenElements = new Set<Element>();
@@ -151,6 +213,19 @@ export class OptimizedSnapshotExtractor {
                     if (text.length > 60) text = text.slice(0, 57) + '...';
                 }
 
+                // Skip elements with no text and no specific interactive traits (unless it's an input/button with other attrs)
+                // Esto ayuda a filtrar <li> o <div> vacíos que se colaron por las heurísticas
+                if (!text && !el.getAttribute('aria-label') && !el.getAttribute('title') &&
+                    !['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(el.tagName) &&
+                    el.getAttribute('role') !== 'button') {
+                    // Si el elemento no tiene texto ni atributos descriptivos, y no es un control nativo, lo saltamos
+                    // A menos que tenga hijos interactivos... pero aquí estamos capturando nodos hoja o contenedores.
+                    // Si es un contenedor puramente estructural sin texto propio, podría ser ruido.
+                    // Permitiremos contenedores si tienen dimensiones significativas, pero la regla general es: si no tiene nombre, el LLM no puede usarlo.
+                    continue;
+                }
+
+
                 const element: any = {
                     ref: ref,
                     tag: tag,
@@ -167,6 +242,38 @@ export class OptimizedSnapshotExtractor {
                         h: Math.round(rect.height)
                     }
                 };
+
+                // Enhanced Properties
+                const expanded = el.getAttribute('aria-expanded');
+                if (expanded === 'true') element.isExpanded = true;
+
+                const selected = (el as any).selected || (el as any).checked || el.getAttribute('aria-selected') === 'true' || el.getAttribute('aria-checked') === 'true';
+                if (selected) element.isSelected = true;
+
+                const required = (el as any).required || el.getAttribute('aria-required') === 'true';
+                if (required) element.isRequired = true;
+
+                if (document.activeElement === el) element.isFocused = true;
+
+                const readonly = (el as any).readOnly || el.getAttribute('aria-readonly') === 'true';
+                if (readonly) element.isReadonly = true;
+
+                const invalid = el.getAttribute('aria-invalid') === 'true' ||
+                    (el.classList && (el.classList.contains('is-invalid') || el.classList.contains('error'))) ||
+                    ((el as any).willValidate && !(el as any).validity.valid);
+                if (invalid) element.isInvalid = true;
+
+                // Try to find label
+                if (el.id) {
+                    const label = document.querySelector(`label[for="${el.id}"]`);
+                    if (label && label.textContent) {
+                        element.label = label.textContent.trim().slice(0, 50);
+                    }
+                }
+                // Implicit label wrapping
+                if (!element.label && el.parentElement && el.parentElement.tagName === 'LABEL') {
+                    element.label = el.parentElement.innerText.replace(element.text, '').trim().slice(0, 50);
+                }
 
                 // Agregar atributos opcionales solo si existen
                 if (el instanceof HTMLInputElement) {
@@ -189,10 +296,15 @@ export class OptimizedSnapshotExtractor {
                 const testId = el.getAttribute('data-testid') || el.getAttribute('data-test-id');
                 if (testId) element.testId = testId;
 
+                // Classname helpful for debugging or heuristic matching
+                if (el.className && typeof el.className === 'string') {
+                    element.className = el.className.slice(0, 50);
+                }
+
                 elements.push(element);
 
                 // Límite de elementos para evitar snapshots enormes
-                if (elements.length >= 100) break;
+                if (elements.length >= 500) break;
             }
 
             // === Detectar estado de la página ===
