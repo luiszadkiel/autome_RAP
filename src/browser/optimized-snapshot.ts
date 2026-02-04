@@ -50,14 +50,19 @@ export class OptimizedSnapshotExtractor {
         const startTime = Date.now();
 
         const snapshot = await page.evaluate(() => {
+            // @ts-ignore - Shim for esbuild __name helper that might be injected (using window to avoid renaming)
+            (window as any).__name = (target: any, value: any) => target;
             const elements: any[] = [];
             let refCounter = 0;
 
             // === Función de visibilidad optimizada ===
             const isVisible = (el: HTMLElement): boolean => {
-                if (!el.offsetParent && el.tagName !== 'BODY' && el.tagName !== 'HTML') return false;
                 const style = getComputedStyle(el);
                 if (style.display === 'none' || style.visibility === 'hidden') return false;
+
+                // Fix: elements with position: fixed often have null offsetParent
+                if (!el.offsetParent && style.position !== 'fixed' && el.tagName !== 'BODY' && el.tagName !== 'HTML') return false;
+
                 if (parseFloat(style.opacity) === 0) return false;
                 const rect = el.getBoundingClientRect();
                 return rect.width > 0 && rect.height > 0;
@@ -90,24 +95,31 @@ export class OptimizedSnapshotExtractor {
             const allInteractive: HTMLElement[] = [];
 
             // Recolectar elementos únicos
-            for (const selector of selectors) {
+            for (let i = 0; i < selectors.length; i++) {
                 try {
-                    // Usar Array.from para iterar NodeList de forma segura
-                    const found = document.querySelectorAll(selector);
-                    Array.from(found).forEach(el => {
+                    const found = document.querySelectorAll(selectors[i]);
+                    // Usar for loop básico en lugar de Array.from/forEach
+                    for (let j = 0; j < found.length; j++) {
+                        const el = found[j];
+                        // Explicitly exclude non-interactive metadata tags
+                        const tagName = el.tagName.toUpperCase();
+                        // Explicitly exclude non-interactive metadata tags and SVGs (unless specific interactive roles)
+                        if (['TITLE', 'SCRIPT', 'STYLE', 'META', 'LINK', 'NOSCRIPT', 'HEAD', 'HTML', 'BODY', 'SVG', 'PATH', 'G', 'DEFS', 'SYMBOL', 'DESC', 'USE'].includes(tagName)) continue;
+
                         if (!seenElements.has(el) && el instanceof HTMLElement) {
                             seenElements.add(el);
                             allInteractive.push(el);
                         }
-                    });
-                } catch { /* selector inválido, ignorar */ }
+                    }
+                } catch (e) { /* selector inválido, ignorar */ }
             }
 
             // Procesar elementos
             const viewportHeight = window.innerHeight;
             const viewportWidth = window.innerWidth;
 
-            for (const el of allInteractive) {
+            for (let i = 0; i < allInteractive.length; i++) {
+                const el = allInteractive[i];
                 if (!isVisible(el)) continue;
 
                 const rect = el.getBoundingClientRect();
@@ -116,7 +128,7 @@ export class OptimizedSnapshotExtractor {
                 if (rect.bottom < -viewportHeight || rect.top > viewportHeight * 2) continue;
                 if (rect.right < 0 || rect.left > viewportWidth) continue;
 
-                const ref = `e${++refCounter}`;
+                const ref = 'e' + (++refCounter);
                 const tag = el.tagName.toLowerCase();
 
                 // Extraer texto de forma inteligente
@@ -128,16 +140,21 @@ export class OptimizedSnapshotExtractor {
                         text = el.title || '';
                     }
                 } else {
-                    // Obtener texto directo, no de hijos
-                    text = (el.textContent || '').trim();
+                    // Use innerText to get only visible text, avoiding hidden metadata like <title> in SVGs
+                    // This prevents the agent from seeing and trying to click invisible text
+                    text = (el.innerText || '').trim();
+
+                    // Fallback to textContent if innerText is empty but it's a specific role that might need it? 
+                    // No, usually hidden text shouldn't be clicked.
+
                     // Truncar textos largos
                     if (text.length > 60) text = text.slice(0, 57) + '...';
                 }
 
                 const element: any = {
-                    ref,
-                    tag,
-                    text,
+                    ref: ref,
+                    tag: tag,
+                    text: text,
                     isButton: tag === 'button' || el.getAttribute('role') === 'button' || el.classList.contains('btn'),
                     isInput: ['input', 'select', 'textarea'].includes(tag),
                     isLink: tag === 'a' || el.getAttribute('role') === 'link',
@@ -193,14 +210,20 @@ export class OptimizedSnapshotExtractor {
                 '.popup:not(.hidden)', '.overlay.active'
             ];
 
-            for (const selector of modalSelectors) {
-                const modal = document.querySelector(selector);
+            for (let i = 0; i < modalSelectors.length; i++) {
+                const modal = document.querySelector(modalSelectors[i]);
                 if (modal instanceof HTMLElement && isVisible(modal)) {
                     pageState.hasModal = true;
-                    const title = modal.querySelector('h1, h2, h3, .modal-title, [role="heading"]')?.textContent?.trim() || '';
-                    const buttons = Array.from(modal.querySelectorAll('button'))
-                        .map(b => b.textContent?.trim())
-                        .filter(Boolean);
+                    const titleEl = modal.querySelector('h1, h2, h3, .modal-title, [role="heading"]');
+                    const title = titleEl?.textContent?.trim() || '';
+
+                    const buttons: string[] = [];
+                    const foundButtons = modal.querySelectorAll('button');
+                    for (let k = 0; k < foundButtons.length; k++) {
+                        const t = foundButtons[k].textContent?.trim();
+                        if (t) buttons.push(t);
+                    }
+
                     pageState.modalInfo = { title: title.slice(0, 50), buttons: buttons.slice(0, 5) };
                     break;
                 }
@@ -208,7 +231,9 @@ export class OptimizedSnapshotExtractor {
 
             // Detectar loading
             const loadingSelectors = '.loading, .spinner, .loader, [class*="loading"], [aria-busy="true"]';
-            for (const loader of Array.from(document.querySelectorAll(loadingSelectors))) {
+            const loaders = document.querySelectorAll(loadingSelectors);
+            for (let i = 0; i < loaders.length; i++) {
+                const loader = loaders[i];
                 if (loader instanceof HTMLElement && isVisible(loader)) {
                     pageState.isLoading = true;
                     break;
@@ -217,10 +242,14 @@ export class OptimizedSnapshotExtractor {
 
             // Detectar errores
             const errorSelectors = '.error, .alert-danger, .alert-error, [role="alert"], .invalid-feedback';
-            for (const error of Array.from(document.querySelectorAll(errorSelectors))) {
+            const errors = document.querySelectorAll(errorSelectors);
+            for (let i = 0; i < errors.length; i++) {
+                const error = errors[i];
                 if (error instanceof HTMLElement && isVisible(error) && error.textContent?.trim()) {
                     pageState.hasErrors = true;
-                    pageState.errorMessages.push(error.textContent.trim().slice(0, 100));
+                    if (error.textContent) {
+                        pageState.errorMessages.push(error.textContent.trim().slice(0, 100));
+                    }
                 }
             }
 
@@ -236,12 +265,12 @@ export class OptimizedSnapshotExtractor {
             return {
                 url: window.location.href,
                 title: document.title,
-                elements,
-                pageState,
+                elements: elements,
+                pageState: pageState,
                 meta: {
                     timestamp: Date.now(),
                     elementCount: elements.length,
-                    extractionTimeMs: 0 // Valor inicial para cumplir con tipo
+                    extractionTimeMs: 0
                 }
             };
         });

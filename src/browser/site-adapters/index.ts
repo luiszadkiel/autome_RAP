@@ -1,4 +1,5 @@
-import { SiteAdapter, GenericAdapter } from './base-adapter.js';
+import type { SiteAdapter } from './base-adapter.js';
+import { GenericAdapter } from './base-adapter.js';
 import { BookingAdapter } from './booking-adapter.js';
 import { EcommerceAdapter } from './ecommerce-adapter.js';
 
