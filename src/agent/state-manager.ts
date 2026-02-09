@@ -208,6 +208,15 @@ export class StateManager {
     }
 
     /**
+     * Resetea el contador de pasos (post-login) para que la tarea tenga el presupuesto completo.
+     */
+    resetStepCount(): void {
+        this.state.currentStep = 0;
+        this.state.executedActions = [];
+        console.log('🔄 Step counter reseteado (post-login)');
+    }
+
+    /**
      * Verifica si debemos detenernos
      */
     shouldStop(): { stop: boolean; reason: string } {

@@ -58,6 +58,12 @@ export class ActionVerifier {
     private previousSnapshot: PageFingerprint | null = null;
     private previousUrl: string = '';
     private stableChecks = 0;
+    private loginPageCache: { url: string; isLogin: boolean; timestamp: number } | null = null;
+    private configLoginUrl: string | null = null;
+
+    setConfigLoginUrl(loginUrl: string | undefined): void {
+        this.configLoginUrl = loginUrl?.toLowerCase() || null;
+    }
 
     /**
      * Captura el estado ANTES de ejecutar una acción
@@ -308,10 +314,44 @@ export class ActionVerifier {
         }
     }
 
-    /** Detecta si la URL corresponde a una página de login (el login es un paso previo, luego se continúa con la acción). */
+    /**
+     * Detección híbrida de página de login (solo parte URL aquí; DOM en isLoginPageAsync).
+     */
     private isLoginPage(url: string): boolean {
         const u = url.toLowerCase();
-        return /\/login|\/signin|\/auth|\/iniciar-sesion|\/inicio-sesion|front-end\/login|consumer\/login/.test(u);
+        if (this.configLoginUrl && u.includes(this.configLoginUrl)) return true;
+        const loginPatterns = /\/(login|signin|sign-in|auth|iniciar-sesion|inicio-sesion|acceso|acceder|entrar|front-end\/login|consumer\/login|portal\/login|sso|oauth|authenticate|welcome\/login)/;
+        if (loginPatterns.test(u)) return true;
+        if (this.loginPageCache && this.loginPageCache.url === u && Date.now() - this.loginPageCache.timestamp < 5000) {
+            return this.loginPageCache.isLogin;
+        }
+        return false;
+    }
+
+    /**
+     * Versión async que también chequea el DOM (formulario con password). Usar cuando se necesita certeza.
+     */
+    async isLoginPageAsync(page: Page, url: string): Promise<boolean> {
+        if (this.isLoginPage(url)) return true;
+        try {
+            const hasPasswordField = await page.locator('input[type="password"]').isVisible({ timeout: 1500 });
+            if (!hasPasswordField) {
+                this.loginPageCache = { url: url.toLowerCase(), isLogin: false, timestamp: Date.now() };
+                return false;
+            }
+            const hasUserField = await page.locator(
+                'input[type="email"], input[type="text"][name*="user"], input[name*="email"], input[name*="login"]'
+            ).count() > 0;
+            const hasSubmit = await page.locator(
+                'button[type="submit"], input[type="submit"], button:has-text("Login"), button:has-text("Sign in"), button:has-text("Entrar"), button:has-text("Acceder"), button:has-text("Iniciar")'
+            ).count() > 0;
+            const isLogin = hasPasswordField && (hasUserField || hasSubmit);
+            this.loginPageCache = { url: url.toLowerCase(), isLogin, timestamp: Date.now() };
+            return isLogin;
+        } catch {
+            this.loginPageCache = { url: url.toLowerCase(), isLogin: false, timestamp: Date.now() };
+            return false;
+        }
     }
 
     /**
@@ -326,7 +366,8 @@ export class ActionVerifier {
         const reasons: string[] = [];
         let shouldRetry = false;
         let suggestedAction: string | undefined;
-        const onLoginPage = this.isLoginPage(preState.url);
+        const onLoginPage = this.isLoginPage(preState.url) ||
+            (!!this.loginPageCache && this.loginPageCache.url === preState.url && this.loginPageCache.isLogin);
 
         // === Reglas por tipo de acción ===
 

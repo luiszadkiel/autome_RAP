@@ -12,12 +12,14 @@ import { waitForPageReady } from '../browser/page-waits.js';
 import { extractContent } from '../browser/content-extractor.js';
 import { ActionHistory } from './prompts/system-prompt.js';
 import { getSessionFilePath, hasStoredSession, ensureSessionsDir } from './session-persistence.js';
+import { LoginVerifier } from './login-verifier.js';
 
 interface AgentConfig {
     url: string;
     objective: string;
     structuredData: StructuredData;
     maxSteps?: number;
+    maxLoginSteps?: number;
     headless?: boolean;
     recordFlow?: string;
 }
@@ -56,6 +58,7 @@ export class WebAgent {
     private elementResolver: ElementResolver;
     private batchExecutor: BatchActionExecutor;
     private siteAdapter: SiteAdapter | null = null;
+    private loginVerifier: LoginVerifier;
     /** Respuestas API/XHR capturadas para contexto del LLM (precios, disponibilidad, etc.) */
     private capturedApiData: { url: string; data: unknown }[] = [];
     /** Ruta donde guardar storageState al finalizar (persistencia de sesión por dominio) */
@@ -96,6 +99,7 @@ export class WebAgent {
         this.stateManager = new StateManager(config.maxSteps || 30);
         this.elementResolver = new ElementResolver();
         this.batchExecutor = new BatchActionExecutor(this.verifier, this.elementResolver);
+        this.loginVerifier = new LoginVerifier();
     }
 
     async run(params: {
@@ -135,9 +139,12 @@ export class WebAgent {
             objective: params.instruction,
             structuredData,
             maxSteps: this.config.maxSteps,
+            maxLoginSteps: 5,
             headless: this.config.headless,
             recordFlow: params.flowName
         };
+
+        this.verifier.setConfigLoginUrl(params.loginUrl ?? undefined);
 
         try {
             // 1. Inicializar navegador (con persistencia de sesión por dominio si aplica)
@@ -252,17 +259,45 @@ export class WebAgent {
                 console.warn('⚠️ Advertencia: Warm-up no detectó suficientes elementos, continuando de todos modos...');
             }
 
-            // 5. Loop principal
+            // 5. Loop principal (con presupuesto de login separado)
             let lastResult: { success: boolean; error?: string; suggestion?: string } | undefined;
+            let loginBudget = config.maxLoginSteps ?? 5;
+            let loginCompleted = !params.loginUrl;
 
             while (true) {
                 await this.page.waitForLoadState('domcontentloaded').catch(() => { });
 
-                // Verificar si debemos detenernos (por límites)
-                const stopCheck = this.stateManager.shouldStop();
-                if (stopCheck.stop) {
-                    console.log(`⏹️ Deteniendo: ${stopCheck.reason}`);
-                    break;
+                const currentUrl = this.page!.url();
+
+                // --- Control de pasos separado: login vs tarea ---
+                if (params.loginUrl && !loginCompleted) {
+                    const stillOnLogin = this.isLoginRelatedPage(currentUrl);
+                    if (!stillOnLogin || loginBudget <= 1) {
+                        const loginCheck = await this.loginVerifier.verify(this.page!, params.loginUrl);
+                        console.log(`🔐 Login verification: ${loginCheck.isLoggedIn ? '✅' : '❌'} (${loginCheck.confidence}%)`);
+                        loginCheck.evidence.forEach(e => console.log(`   ${e}`));
+                        if (!loginCheck.isLoggedIn) {
+                            return this.createResult('login_failed', startTime, config.objective,
+                                new Error(loginCheck.failureReason || 'Login verification failed'));
+                        }
+                        loginCompleted = true;
+                        this.stateManager.resetStepCount();
+                        console.log(`✅ Login completado. Reseteando contador para tarea.`);
+                    } else {
+                        loginBudget--;
+                        if (loginBudget <= 0) {
+                            console.log('❌ Login agotó su presupuesto de pasos');
+                            return this.createResult('login_failed', startTime, config.objective);
+                        }
+                    }
+                }
+
+                if (loginCompleted) {
+                    const stopCheck = this.stateManager.shouldStop();
+                    if (stopCheck.stop) {
+                        console.log(`⏹️ Deteniendo: ${stopCheck.reason}`);
+                        break;
+                    }
                 }
 
                 // Detectar página de pago
@@ -466,6 +501,12 @@ export class WebAgent {
         } finally {
             await this.cleanup();
         }
+    }
+
+    /** Detecta si la URL es de login (para presupuesto de pasos y verificación). */
+    private isLoginRelatedPage(url: string): boolean {
+        const u = url.toLowerCase();
+        return /\/login|\/signin|\/auth|\/iniciar-sesion|front-end\/login|consumer\/login/.test(u);
     }
 
     /** Detecta si la instrucción es de extracción (precios, listados, información) para activar extractContent */
