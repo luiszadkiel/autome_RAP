@@ -308,6 +308,12 @@ export class ActionVerifier {
         }
     }
 
+    /** Detecta si la URL corresponde a una página de login (el login es un paso previo, luego se continúa con la acción). */
+    private isLoginPage(url: string): boolean {
+        const u = url.toLowerCase();
+        return /\/login|\/signin|\/auth|\/iniciar-sesion|\/inicio-sesion|front-end\/login|consumer\/login/.test(u);
+    }
+
     /**
      * Calcula el resultado final de la verificación
      */
@@ -320,12 +326,12 @@ export class ActionVerifier {
         const reasons: string[] = [];
         let shouldRetry = false;
         let suggestedAction: string | undefined;
+        const onLoginPage = this.isLoginPage(preState.url);
 
         // === Reglas por tipo de acción ===
 
         switch (context.action) {
             case 'click':
-                // Un click exitoso generalmente produce cambios
                 if (evidence.domChanged) {
                     confidence += 25;
                     reasons.push('DOM cambió después del click');
@@ -339,22 +345,31 @@ export class ActionVerifier {
                     reasons.push('Aparecieron nuevos elementos');
                 }
                 if (!evidence.domChanged && !evidence.urlChanged) {
-                    confidence -= 30;
-                    reasons.push('No hubo cambios visibles');
-                    shouldRetry = true;
-                    suggestedAction = 'Intentar doble click o verificar si el elemento es clickeable';
+                    if (onLoginPage) {
+                        // En login: no penalizar fuerte; el envío puede ser asíncrono
+                        confidence -= 5;
+                        reasons.push('Sin cambios visibles aún (login puede estar procesando)');
+                    } else {
+                        confidence -= 30;
+                        reasons.push('No hubo cambios visibles');
+                        shouldRetry = true;
+                        suggestedAction = 'Intentar doble click o verificar si el elemento es clickeable';
+                    }
                 }
                 break;
 
             case 'type':
-                // Check value change OR significant DOM change (like dropdown opening)
                 if (evidence.targetElementChanged || evidence.newElementsAppeared || evidence.domChanged) {
                     confidence += 35;
                     reasons.push('Input actualizado o cambios en UI detectados');
                 } else if (!evidence.errorsDetected.length) {
-                    // Fallback: Si no hay error y no cambió nada, quizás es un input raro (shadow dom, canvas, etc)
-                    confidence += 10;
-                    reasons.push('No se detectaron cambios pero tampoco errores (Silent Success?)');
+                    if (onLoginPage) {
+                        confidence += 25;
+                        reasons.push('Login: texto ingresado sin errores, continuar');
+                    } else {
+                        confidence += 10;
+                        reasons.push('No se detectaron cambios pero tampoco errores (Silent Success?)');
+                    }
                 } else {
                     confidence -= 25;
                     reasons.push('El texto no parece haberse ingresado');
@@ -422,7 +437,10 @@ export class ActionVerifier {
         }
 
         if (!evidence.loadingComplete) {
-            if (!hasPositiveEvidence) {
+            if (onLoginPage) {
+                confidence -= 0;
+                reasons.push('Página de login puede seguir cargando (no bloqueante)');
+            } else if (!hasPositiveEvidence) {
                 confidence -= 15;
                 reasons.push('Página aún cargando');
             } else {

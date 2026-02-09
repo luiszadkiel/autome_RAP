@@ -1,4 +1,5 @@
 import { Page } from 'playwright';
+import type { ExtractedContent } from './content-extractor.js';
 
 export interface OptimizedElement {
     ref: string;
@@ -37,6 +38,8 @@ export interface OptimizedElement {
     inputValue?: string;
 
     rect: { x: number; y: number; w: number; h: number };
+    /** Si el elemento viene de un iframe */
+    frameRef?: boolean;
     // Para matching robusto
     testId?: string;
     name?: string;
@@ -44,10 +47,30 @@ export interface OptimizedElement {
     id?: string;
 }
 
+/** Contenido de texto y estructura de la página (no solo interactivos) */
+export interface PageContent {
+    headings: { level: number; text: string }[];
+    paragraphs: string[];
+    labels: string[];
+    tables: { headers?: string[]; rows: string[][] }[];
+    lists: { items: string[] }[];
+    semantic: { region: string; text: string }[];
+}
+
+/** Detección de framework/tecnología del sitio */
+export interface FrameworkInfo {
+    isSpa: boolean;
+    framework?: 'react' | 'vue' | 'angular' | 'jquery' | 'unknown';
+    hasShadowDom: boolean;
+    serverRendered?: boolean;
+}
+
 export interface OptimizedSnapshot {
     url: string;
     title: string;
     elements: OptimizedElement[];
+    pageContent?: PageContent;
+    framework?: FrameworkInfo;
     pageState: {
         hasModal: boolean;
         modalInfo?: { title: string; buttons: string[] };
@@ -56,6 +79,10 @@ export interface OptimizedSnapshot {
         errorMessages: string[];
         currentForm?: { action: string; method: string; };
     };
+    /** Respuestas API/XHR capturadas (si está habilitada la interceptación) */
+    capturedApiData?: { url: string; data: unknown }[];
+    /** Contenido extraído con Readability/tablas/precios (modo extracción) */
+    extractedContent?: ExtractedContent;
     meta: {
         timestamp: number;
         elementCount: number;
@@ -67,10 +94,43 @@ export class OptimizedSnapshotExtractor {
     private lastSnapshot: OptimizedSnapshot | null = null;
 
     /**
-     * Extrae snapshot optimizado en UNA SOLA llamada a evaluate
+     * Espera a que el DOM deje de cambiar (MutationObserver) antes de tomar snapshot
      */
-    async extract(page: Page): Promise<OptimizedSnapshot> {
+    async waitForDomStable(page: Page, silenceMs: number = 400, maxWaitMs: number = 5000): Promise<void> {
+        await page.evaluate(
+            ({ silenceMs, maxWaitMs }) =>
+                new Promise<void>((resolve) => {
+                    let timeout: ReturnType<typeof setTimeout>;
+                    const observer = new MutationObserver(() => {
+                        clearTimeout(timeout);
+                        timeout = setTimeout(() => {
+                            observer.disconnect();
+                            resolve();
+                        }, silenceMs);
+                    });
+                    observer.observe(document.body, {
+                        childList: true,
+                        subtree: true,
+                        attributes: true,
+                        attributeFilter: ['class', 'style', 'aria-expanded', 'hidden']
+                    });
+                    setTimeout(() => {
+                        observer.disconnect();
+                        resolve();
+                    }, maxWaitMs);
+                }),
+            { silenceMs, maxWaitMs }
+        ).catch(() => {});
+    }
+
+    /**
+     * Extrae snapshot optimizado (con espera de DOM estable y soporte iframes)
+     */
+    async extract(page: Page, options?: { skipDomStable?: boolean; includeFrames?: boolean }): Promise<OptimizedSnapshot> {
         const startTime = Date.now();
+        if (!options?.skipDomStable) {
+            await this.waitForDomStable(page);
+        }
 
         const snapshot = await page.evaluate(() => {
             // @ts-ignore - Shim for esbuild __name helper that might be injected (using window to avoid renaming)
@@ -666,10 +726,99 @@ export class OptimizedSnapshotExtractor {
                 };
             }
 
+            // === Contenido de texto (headings, párrafos, tablas, listas, semántica) ===
+            const pageContent: any = {
+                headings: [] as { level: number; text: string }[],
+                paragraphs: [] as string[],
+                labels: [] as string[],
+                tables: [] as { headers?: string[]; rows: string[][] }[],
+                lists: [] as { items: string[] }[],
+                semantic: [] as { region: string; text: string }[]
+            };
+            const textLimit = (s: string, max: number) => (s || '').trim().slice(0, max);
+            const addHeading = (el: Element) => {
+                const tag = el.tagName.toUpperCase();
+                const match = tag.match(/^H([1-6])$/);
+                if (match && el instanceof HTMLElement && isVisible(el)) {
+                    const t = el.innerText?.trim();
+                    if (t) pageContent.headings.push({ level: parseInt(match[1], 10), text: textLimit(t, 200) });
+                }
+            };
+            document.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(addHeading);
+            document.querySelectorAll('p').forEach(el => {
+                if (el instanceof HTMLElement && isVisible(el)) {
+                    const t = el.innerText?.trim();
+                    if (t) pageContent.paragraphs.push(textLimit(t, 300));
+                }
+            });
+            document.querySelectorAll('label').forEach(el => {
+                if (el instanceof HTMLElement && isVisible(el)) {
+                    const t = el.textContent?.trim();
+                    if (t) pageContent.labels.push(textLimit(t, 100));
+                }
+            });
+            document.querySelectorAll('table').forEach(table => {
+                if (!(table instanceof HTMLElement) || !isVisible(table)) return;
+                const rows: string[][] = [];
+                const ths = table.querySelectorAll('thead th');
+                const headers = ths.length ? Array.from(ths).map(th => textLimit(th.textContent || '', 80)) : undefined;
+                if (headers) rows.push(headers);
+                table.querySelectorAll('tbody tr, tr').forEach(tr => {
+                    const cells = tr.querySelectorAll('td, th');
+                    if (cells.length) rows.push(Array.from(cells).map(c => textLimit(c.textContent || '', 80)));
+                });
+                if (rows.length) pageContent.tables.push({ headers, rows });
+            });
+            document.querySelectorAll('ul, ol').forEach(list => {
+                if (!(list instanceof HTMLElement) || !isVisible(list)) return;
+                const items = Array.from(list.querySelectorAll(':scope > li')).map(li => textLimit(li.textContent || '', 150));
+                if (items.length) pageContent.lists.push({ items });
+            });
+            const semanticSelectors = ['nav', 'header', 'main', 'footer', 'aside', 'article'];
+            semanticSelectors.forEach(region => {
+                document.querySelectorAll(region).forEach(el => {
+                    if (el instanceof HTMLElement && isVisible(el)) {
+                        const t = el.innerText?.trim();
+                        if (t) pageContent.semantic.push({ region, text: textLimit(t, 250) });
+                    }
+                });
+            });
+
+            // === Detección de framework/tecnología ===
+            const win = window as any;
+            let framework: 'react' | 'vue' | 'angular' | 'jquery' | 'unknown' | undefined;
+            let isSpa = false;
+            if (win.__REACT_DEVTOOLS_GLOBAL_HOOK__ || win.React || win.__REACT__) {
+                framework = 'react';
+                isSpa = true;
+            } else if (win.__VUE__ || win.Vue) {
+                framework = 'vue';
+                isSpa = true;
+            } else if (win.ng || win.getAllAngularRootElements) {
+                framework = 'angular';
+                isSpa = true;
+            } else if (win.jQuery || win.$) {
+                framework = 'jquery';
+            }
+            let hasShadowDom = false;
+            try {
+                const all = document.body?.querySelectorAll('*');
+                if (all) {
+                    for (let i = 0; i < Math.min(all.length, 200); i++) {
+                        if ((all[i] as any).shadowRoot) {
+                            hasShadowDom = true;
+                            break;
+                        }
+                    }
+                }
+            } catch (_) {}
+
             return {
                 url: window.location.href,
                 title: document.title,
                 elements: elements,
+                pageContent,
+                framework: { isSpa, framework, hasShadowDom },
                 pageState: pageState,
                 meta: {
                     timestamp: Date.now(),
@@ -678,6 +827,65 @@ export class OptimizedSnapshotExtractor {
                 }
             };
         });
+
+        // === Elementos en iframes (Stripe, reCAPTCHA, embeds) ===
+        if (options?.includeFrames !== false) {
+            const frames = page.frames();
+            let frameIndex = 0;
+            for (const frame of frames) {
+                if (frame === page.mainFrame()) continue;
+                try {
+                    const frameElements = await frame.evaluate(() => {
+                        const out: any[] = [];
+                        let refCounter = 0;
+                        const isVisible = (el: HTMLElement): boolean => {
+                            const style = getComputedStyle(el);
+                            if (style.display === 'none' || style.visibility === 'hidden') return false;
+                            const rect = el.getBoundingClientRect();
+                            return rect.width > 0 && rect.height > 0;
+                        };
+                        const sel = 'button, input:not([type="hidden"]), select, textarea, a[href], [role="button"], [role="link"], [role="textbox"], [role="combobox"], label';
+                        document.querySelectorAll(sel).forEach((el: Element) => {
+                            if (!(el instanceof HTMLElement) || !isVisible(el)) return;
+                            const rect = el.getBoundingClientRect();
+                            const ref = 'e' + (++refCounter);
+                            const tag = el.tagName.toLowerCase();
+                            let text = '';
+                            if (el instanceof HTMLInputElement || el instanceof HTMLSelectElement) {
+                                text = (el as HTMLInputElement).placeholder || el.title || '';
+                            } else {
+                                text = (el.innerText || '').trim().slice(0, 100);
+                            }
+                            out.push({
+                                ref,
+                                tag,
+                                text,
+                                isButton: tag === 'button' || el.getAttribute('role') === 'button',
+                                isInput: ['input', 'select', 'textarea'].includes(tag),
+                                isLink: tag === 'a',
+                                isDisabled: (el as any).disabled || el.getAttribute('aria-disabled') === 'true',
+                                isVisible: true,
+                                rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
+                                frameRef: true
+                            });
+                        });
+                        return out;
+                    });
+                    const prefix = 'f' + frameIndex + '-';
+                    for (const el of frameElements) {
+                        snapshot.elements.push({
+                            ...el,
+                            ref: prefix + el.ref,
+                            testId: (el.testId || '') ? el.testId : undefined,
+                        });
+                    }
+                    frameIndex++;
+                } catch (_) {
+                    // iframe puede ser cross-origin y no accesible
+                }
+            }
+            snapshot.meta.elementCount = snapshot.elements.length;
+        }
 
         // Agregar tiempo de extracción real
         snapshot.meta.extractionTimeMs = Date.now() - startTime;

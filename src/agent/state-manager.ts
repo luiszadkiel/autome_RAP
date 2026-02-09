@@ -99,6 +99,18 @@ export class StateManager {
     }
 
     /**
+     * Detecta bucle detalle → back → lista → click producto (sin extraer precios).
+     * Si en los últimos 10 pasos hay 3+ "back" y 3+ "click", consideramos que está repitiendo el ciclo.
+     */
+    isInDetailBackClickLoop(): boolean {
+        if (this.state.currentStep < 12) return false;
+        const recent = this.state.executedActions.slice(-10);
+        const backs = recent.filter(a => a.action === 'back').length;
+        const clicks = recent.filter(a => a.action === 'click').length;
+        return backs >= 3 && clicks >= 3;
+    }
+
+    /**
      * Registra un intento de recuperación
      * Retorna true si se debe continuar con recuperación, false si ya se agotaron intentos
      */

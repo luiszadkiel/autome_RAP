@@ -1,13 +1,17 @@
 import { chromium, Browser, Page, BrowserContext } from 'playwright';
 import { OptimizedSnapshotExtractor, OptimizedSnapshot } from '../browser/optimized-snapshot.js';
 import { OptimizedOpenAIClient, BatchDecision } from './optimized-openai-client.js';
+import { tryObviousLocalDecision } from './local-decision.js';
 import { BatchActionExecutor, BatchExecutionResult } from './batch-executor.js';
 import { ActionVerifier, VerificationResult } from './action-verifier.js';
 import { StateManager } from './state-manager.js';
 import { RetryManager } from './retry-strategy.js';
 import { ElementResolver } from '../browser/element-resolver.js';
 import { AdapterFactory, SiteAdapter } from '../browser/site-adapters/index.js';
+import { waitForPageReady } from '../browser/page-waits.js';
+import { extractContent } from '../browser/content-extractor.js';
 import { ActionHistory } from './prompts/system-prompt.js';
+import { getSessionFilePath, hasStoredSession, ensureSessionsDir } from './session-persistence.js';
 
 interface AgentConfig {
     url: string;
@@ -52,13 +56,22 @@ export class WebAgent {
     private elementResolver: ElementResolver;
     private batchExecutor: BatchActionExecutor;
     private siteAdapter: SiteAdapter | null = null;
+    /** Respuestas API/XHR capturadas para contexto del LLM (precios, disponibilidad, etc.) */
+    private capturedApiData: { url: string; data: unknown }[] = [];
+    /** Ruta donde guardar storageState al finalizar (persistencia de sesión por dominio) */
+    private sessionPathForSave: string | null = null;
+    private static readonly MAX_CAPTURED_API = 25;
     private config: {
         openaiApiKey: string;
         headless?: boolean;
         recordFlow?: boolean;
         maxSteps?: number;
         openaiModel?: string;
+        openaiMaxTokens?: number;
+        useMiniForSimpleSteps?: boolean;
         screenshotOnEachStep?: boolean;
+        /** Directorio para sesiones guardadas (cookies/storage). Por defecto data/sessions */
+        sessionsDir?: string;
     };
 
     constructor(config: {
@@ -67,11 +80,18 @@ export class WebAgent {
         recordFlow?: boolean;
         maxSteps?: number;
         openaiModel?: string;
+        openaiMaxTokens?: number;
+        useMiniForSimpleSteps?: boolean;
         screenshotOnEachStep?: boolean;
+        sessionsDir?: string;
     }) {
         this.config = config;
         this.snapshotExtractor = new OptimizedSnapshotExtractor();
-        this.openaiClient = new OptimizedOpenAIClient(config.openaiApiKey);
+        this.openaiClient = new OptimizedOpenAIClient(config.openaiApiKey, {
+            model: config.openaiModel ?? 'gpt-4o',
+            maxTokens: config.openaiMaxTokens ?? 1200,
+            useMiniForSimpleSteps: config.useMiniForSimpleSteps ?? true
+        });
         this.verifier = new ActionVerifier();
         this.stateManager = new StateManager(config.maxSteps || 30);
         this.elementResolver = new ElementResolver();
@@ -82,6 +102,8 @@ export class WebAgent {
         url: string;
         instruction: string;
         credentials?: { email?: string; username?: string; password?: string };
+        /** URL donde loguearse (si es distinta de url). Si se indica, se navega primero aquí. */
+        loginUrl?: string;
         flowName?: string;
         context?: BrowserContext;
     }): Promise<AgentResult> {
@@ -118,21 +140,50 @@ export class WebAgent {
         };
 
         try {
-            // 1. Inicializar navegador
+            // 1. Inicializar navegador (con persistencia de sesión por dominio si aplica)
+            const initialUrl = params.loginUrl || config.url;
+            const hostname = new URL(initialUrl).hostname;
+
             if (params.context) {
                 console.log('🚀 Iniciando agente optimizado (Contexto compartido)...');
                 this.context = params.context;
-                // No asignamos this.browser para evitar cerrarlo al final
             } else {
                 console.log('🚀 Iniciando agente optimizado (Nuevo navegador)...');
                 this.browser = await chromium.launch({ headless: config.headless ?? false });
-                this.context = await this.browser.newContext();
+                const sessionPath = getSessionFilePath(hostname, this.config.sessionsDir);
+                if (hasStoredSession(hostname, this.config.sessionsDir)) {
+                    this.context = await this.browser.newContext({ storageState: sessionPath });
+                    console.log('🔐 Sesión restaurada para', hostname);
+                } else {
+                    this.context = await this.browser.newContext();
+                }
+                this.sessionPathForSave = sessionPath;
             }
 
             this.page = await this.context.newPage();
 
-            // 2. Navegar a URL inicial con fallback de estrategias
-            console.log(`🌐 Navegando a ${config.url}...`);
+            // Interceptar respuestas API para obtener datos estructurados (precios, disponibilidad, etc.)
+            this.page.on('response', async (response) => {
+                const url = response.url();
+                if (!url.includes('/api/') && !url.includes('graphql') && !url.includes('rest/')) return;
+                if (response.status() !== 200) return;
+                try {
+                    const data = await response.json().catch(() => null);
+                    if (data) {
+                        this.capturedApiData.push({ url, data });
+                        if (this.capturedApiData.length > WebAgent.MAX_CAPTURED_API) {
+                            this.capturedApiData.shift();
+                        }
+                    }
+                } catch (_) {}
+            });
+
+            // 2. Navegar a URL inicial (loginUrl si existe, si no url) con fallback de estrategias
+            if (params.loginUrl) {
+                console.log(`🌐 Navegando a página de login: ${params.loginUrl}...`);
+            } else {
+                console.log(`🌐 Navegando a ${config.url}...`);
+            }
             const waitStrategies: Array<{ strategy: 'domcontentloaded' | 'load' | 'networkidle' | 'commit'; timeout: number }> = [
                 { strategy: 'domcontentloaded', timeout: 20000 },
                 { strategy: 'load', timeout: 25000 },
@@ -143,7 +194,7 @@ export class WebAgent {
             let navigationSuccess = false;
             for (const { strategy, timeout } of waitStrategies) {
                 try {
-                    await this.page.goto(config.url, {
+                    await this.page.goto(initialUrl, {
                         waitUntil: strategy,
                         timeout: timeout
                     });
@@ -157,11 +208,11 @@ export class WebAgent {
             }
 
             if (!navigationSuccess) {
-                throw new Error(`No se pudo navegar a ${config.url} con ninguna estrategia`);
+                throw new Error(`No se pudo navegar a ${initialUrl} con ninguna estrategia`);
             }
 
-            console.log('⏳ Esperando estabilización...');
-            await this.page.waitForTimeout(2000);
+            console.log('⏳ Esperando que la página esté lista...');
+            await waitForPageReady(this.page!, { timeout: 10000 });
 
             // 3. Seleccionar adaptador de sitio
             this.siteAdapter = AdapterFactory.getAdapter(config.url);
@@ -189,12 +240,12 @@ export class WebAgent {
                     // Si el contexto fue destruido por navegación, esperar y reintentar
                     if (e.message?.includes('context was destroyed') || e.message?.includes('navigation')) {
                         console.log('   ...página navegando, esperando estabilización...');
-                        await this.page.waitForTimeout(2000);
+                        await waitForPageReady(this.page, { timeout: 5000 });
                         continue;
                     }
                     throw e;
                 }
-                await this.page.waitForTimeout(1000);
+                await waitForPageReady(this.page, { timeout: 2000 });
             }
 
             if (!warmedUp) {
@@ -225,12 +276,22 @@ export class WebAgent {
                 let snapshot = await this.snapshotExtractor.extract(this.page);
 
                 if (snapshot.elements.length === 0) {
-                    console.log('   ⚠️ Snapshot vacío, esperando 2s...');
-                    await this.page.waitForTimeout(2000);
+                    console.log('   ⚠️ Snapshot vacío, esperando que la página cargue...');
+                    await waitForPageReady(this.page!, { timeout: 5000 });
                     snapshot = await this.snapshotExtractor.extract(this.page);
                 }
 
                 console.log(`   📸 ${snapshot.meta.elementCount} elementos (${snapshot.meta.extractionTimeMs}ms)`);
+
+                snapshot.capturedApiData = this.capturedApiData.length ? [...this.capturedApiData] : undefined;
+
+                if (this.isExtractionObjective(config.objective)) {
+                    try {
+                        snapshot.extractedContent = await extractContent(this.page!);
+                    } catch (e) {
+                        console.log('   ⚠️ extractContent falló:', (e as Error).message);
+                    }
+                }
 
                 // Detectar si estamos atascados
                 if (this.stateManager.isStuck()) {
@@ -243,17 +304,21 @@ export class WebAgent {
                     // Si agotamos intentos de recuperación, continuamos al LLM para nueva estrategia
                 }
 
-                // Pedir decisión a OpenAI (Planificando Batch)
-                console.log('   🤖 Pensando...');
-                const decision: BatchDecision = await this.openaiClient.planActions(
-                    snapshot,
-                    config.objective,
-                    config.structuredData,
-                    this.stateManager.getActionHistory(),
-                    lastResult
-                );
-
-                console.log(`   🤔 "Thinking": ${decision.thinking}`);
+                // Decisión local: si hay un solo botón obvio (Aceptar, Siguiente...), ejecutar sin LLM
+                let decision: BatchDecision | null = tryObviousLocalDecision(snapshot);
+                if (decision) {
+                    console.log('   ⚡ Decisión local (sin LLM):', decision.actions[0]?.why ?? 'click obvio');
+                } else {
+                    console.log('   🤖 Pensando...');
+                    decision = await this.openaiClient.planActions(
+                        snapshot,
+                        config.objective,
+                        config.structuredData,
+                        this.stateManager.getActionHistory(),
+                        lastResult
+                    );
+                    console.log(`   🤔 "Thinking": ${decision.thinking}`);
+                }
 
                 // Registrar URL visitada
                 this.stateManager.addVisitedUrl(this.page!.url());
@@ -365,6 +430,14 @@ export class WebAgent {
                     });
                 }
 
+                // Detectar bucle detalle → back → click producto sin extraer precios
+                if (this.stateManager.isInDetailBackClickLoop()) {
+                    const hasPrice = this.stateManager.getExtractedInfo().some(i => i.type === 'price' || i.type === 'precio');
+                    console.log(`🔄 Bucle detectado (varios back + click sin precio). Deteniendo para evitar repetición infinita.`);
+                    const status = hasPrice ? 'success' : 'price_not_visible_in_detail_pages';
+                    return this.createResult(status, startTime, config.objective);
+                }
+
                 // Actualizar lastResult para el siguiente turno
                 if (batchResult.stoppedEarly) {
                     const fail = batchResult.results.find(r => !r.success);
@@ -393,6 +466,19 @@ export class WebAgent {
         } finally {
             await this.cleanup();
         }
+    }
+
+    /** Detecta si la instrucción es de extracción (precios, listados, información) para activar extractContent */
+    private isExtractionObjective(instruction: string): boolean {
+        const lower = instruction.toLowerCase();
+        const extractionKeywords = [
+            'extraer', 'extrae', 'extraiga', 'obtener', 'obtén', 'listar', 'lista', 'listado',
+            'precios', 'precio', 'price', 'prices', 'cuánto cuesta', 'cuanto cuesta',
+            'disponibilidad', 'disponible', 'availability', 'inventario',
+            'información', 'informacion', 'info', 'datos', 'contenido',
+            'buscar precios', 'sacar precios', 'qué hay', 'que hay', 'resumen'
+        ];
+        return extractionKeywords.some(kw => lower.includes(kw));
     }
 
     private async isPaymentPage(): Promise<boolean> {
@@ -453,11 +539,21 @@ export class WebAgent {
     }
 
     private async cleanup(): Promise<void> {
+        if (this.browser && this.context && this.sessionPathForSave) {
+            try {
+                ensureSessionsDir(this.config.sessionsDir);
+                await this.context.storageState({ path: this.sessionPathForSave });
+                console.log('🔐 Sesión guardada para próxima ejecución');
+            } catch (e) {
+                console.warn('⚠️ No se pudo guardar sesión:', (e as Error).message);
+            }
+            this.sessionPathForSave = null;
+        }
         if (this.browser) {
             await this.browser.close();
-        } else if (this.page) {
-            // Si no somos dueños del browser, al menos cerramos la página
+        } else if (this.page && !this.context) {
             await this.page.close().catch(() => { });
         }
+        // Si tenemos context compartido (ejecución paralela), no cerramos página ni context
     }
 }

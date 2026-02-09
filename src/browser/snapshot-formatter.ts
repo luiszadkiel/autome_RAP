@@ -1,5 +1,6 @@
 
-import { OptimizedSnapshot, OptimizedElement } from './optimized-snapshot.js';
+import { OptimizedSnapshot, OptimizedElement, PageContent, FrameworkInfo } from './optimized-snapshot.js';
+import type { ExtractedContent } from './content-extractor.js';
 
 export interface FormattedSnapshot {
     formattedElements: string;  // Optimized text for LLM
@@ -23,11 +24,11 @@ interface GroupedElements {
 export class SnapshotFormatter {
 
     /**
-     * Converts raw snapshot to LLM-optimized format
+     * Converts raw snapshot to LLM-optimized format (incl. contenido de texto y framework)
      */
     format(snapshot: OptimizedSnapshot): FormattedSnapshot {
         const grouped = this.groupElements(snapshot.elements);
-        const formattedElements = this.formatForLLM(grouped);
+        let formattedElements = this.formatPageContentAndFramework(snapshot) + '\n' + this.formatForLLM(grouped);
 
         return {
             formattedElements,
@@ -37,6 +38,84 @@ export class SnapshotFormatter {
             forms: grouped.forms,
             rawElements: snapshot.elements
         };
+    }
+
+    /**
+     * Formato de contenido de página y detección de framework para el LLM
+     */
+    private formatPageContentAndFramework(snapshot: OptimizedSnapshot): string {
+        let out = '';
+        if (snapshot.framework) {
+            const f: FrameworkInfo = snapshot.framework;
+            out += '### 🔧 SITIO: ' + (f.framework || 'unknown') + (f.isSpa ? ' (SPA)' : '') + (f.hasShadowDom ? ' + Shadow DOM' : '') + '\n';
+        }
+        const pc = snapshot.pageContent;
+        if (!pc) return out;
+        if (pc.headings?.length) {
+            out += '### 📑 HEADINGS\n';
+            out += pc.headings.map(h => '  '.repeat(h.level) + h.text).join('\n') + '\n';
+        }
+        if (pc.paragraphs?.length) {
+            out += '### 📄 PÁRRAFOS (resumen)\n';
+            out += pc.paragraphs.slice(0, 15).map(p => this.truncate(p, 120)).join('\n') + '\n';
+        }
+        if (pc.labels?.length) {
+            out += '### 🏷️ LABELS\n';
+            out += pc.labels.slice(0, 20).join(' | ') + '\n';
+        }
+        if (pc.tables?.length) {
+            out += '### 📊 TABLAS\n';
+            pc.tables.slice(0, 3).forEach((t, i) => {
+                if (t.headers?.length) out += '  Headers: ' + t.headers.join(' | ') + '\n';
+                t.rows.slice(0, 5).forEach(row => {
+                    out += '  ' + row.join(' | ') + '\n';
+                });
+            });
+        }
+        if (pc.lists?.length) {
+            out += '### 📋 LISTAS\n';
+            pc.lists.slice(0, 5).forEach(l => {
+                out += '  - ' + l.items.slice(0, 8).join(', ') + '\n';
+            });
+        }
+        if (pc.semantic?.length) {
+            out += '### 🧭 REGIONES (nav, header, main, footer)\n';
+            pc.semantic.slice(0, 8).forEach(s => {
+                out += `  [${s.region}] ${this.truncate(s.text, 100)}\n`;
+            });
+        }
+        if (snapshot.capturedApiData?.length) {
+            out += '### 🌐 API/XHR CAPTURADAS (datos estructurados)\n';
+            snapshot.capturedApiData.slice(-8).forEach(({ url, data }) => {
+                const shortUrl = url.length > 60 ? url.slice(0, 57) + '...' : url;
+                const preview = typeof data === 'object' ? JSON.stringify(data).slice(0, 200) : String(data).slice(0, 200);
+                out += `  ${shortUrl}\n  → ${this.truncate(preview, 150)}\n`;
+            });
+        }
+        const ec = snapshot.extractedContent;
+        if (ec) {
+            out += '### 📖 MODO EXTRACCIÓN (Readability + datos)\n';
+            if (ec.readability) {
+                out += `  Título: ${this.truncate(ec.readability.title, 80)}\n`;
+                if (ec.readability.excerpt) out += `  Resumen: ${this.truncate(ec.readability.excerpt, 150)}\n`;
+                out += `  Texto (inicio): ${this.truncate(ec.readability.textContent, 500)}\n`;
+            }
+            if (ec.prices?.length) out += '  Precios detectados: ' + ec.prices.slice(0, 15).join(', ') + '\n';
+            if (ec.dates?.length) out += '  Fechas detectadas: ' + ec.dates.slice(0, 10).join(', ') + '\n';
+            if (ec.phones?.length) out += '  Teléfonos: ' + ec.phones.slice(0, 5).join(', ') + '\n';
+            if (ec.tables?.length) {
+                out += '  Tablas extraídas: ' + ec.tables.length + '\n';
+                ec.tables.slice(0, 2).forEach((t, i) => {
+                    if (t.headers?.length) out += '    Headers: ' + t.headers.join(' | ') + '\n';
+                    t.rows.slice(0, 3).forEach(row => { out += '    ' + row.join(' | ') + '\n'; });
+                });
+            }
+            if (ec.structuredData?.jsonLd?.length) out += '  JSON-LD: ' + ec.structuredData.jsonLd.length + ' bloque(s)\n';
+            if (Object.keys(ec.structuredData?.og ?? {}).length) {
+                out += '  Open Graph: ' + JSON.stringify(ec.structuredData.og).slice(0, 120) + '\n';
+            }
+        }
+        return out;
     }
 
     /**

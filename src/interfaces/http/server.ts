@@ -278,7 +278,7 @@ const openApiSpec = {
         '/api/agent/parallel': {
             post: {
                 summary: '🚀 Ejecutar agente en múltiples sitios en paralelo',
-                description: 'Ejecuta el agente IA en múltiples URLs simultáneamente (1-10 sitios). Ideal para comparar precios, buscar productos en varias tiendas, etc.',
+                description: 'Ejecuta el agente IA en múltiples URLs simultáneamente (1-10 sitios). Ideal para comparar precios, buscar productos en varias tiendas, etc. Cada target puede tener su propia URL de login y credenciales para iniciar sesión en múltiples páginas (cada sitio con su login independiente).',
                 tags: ['AI Agent'],
                 requestBody: {
                     required: true,
@@ -291,19 +291,21 @@ const openApiSpec = {
                                     instruction: { type: 'string', description: 'Instrucción en lenguaje natural (se aplica a todos los sitios)' },
                                     targets: {
                                         type: 'array',
-                                        description: 'Lista de sitios web (1-10 máximo)',
+                                        description: 'Lista de sitios web (1-10 máximo). Cada elemento puede incluir loginUrl y credentials para loguearse en esa página.',
                                         items: {
                                             type: 'object',
                                             required: ['url', 'name'],
                                             properties: {
-                                                url: { type: 'string', description: 'URL del sitio' },
+                                                url: { type: 'string', description: 'URL principal del sitio' },
                                                 name: { type: 'string', description: 'Nombre identificador del sitio' },
+                                                loginUrl: { type: 'string', description: 'URL de la página de login de este sitio (opcional). Si se indica junto con credentials, el agente navega primero aquí para iniciar sesión en esta página.' },
                                                 credentials: {
                                                     type: 'object',
+                                                    description: 'Credenciales para iniciar sesión en este target (cada sitio puede tener las suyas).',
                                                     properties: {
-                                                        email: { type: 'string' },
-                                                        username: { type: 'string' },
-                                                        password: { type: 'string' }
+                                                        email: { type: 'string', description: 'Email para login' },
+                                                        username: { type: 'string', description: 'Usuario (alternativa a email)' },
+                                                        password: { type: 'string', description: 'Contraseña' }
                                                     }
                                                 }
                                             }
@@ -318,8 +320,8 @@ const openApiSpec = {
                                 instruction: 'buscar precio de taladro DeWalt DCD771',
                                 targets: [
                                     { url: 'https://www.amazon.com', name: 'Amazon' },
-                                    { url: 'https://www.homedepot.com', name: 'Home Depot' },
-                                    { url: 'https://www.lowes.com', name: 'Lowes' }
+                                    { url: 'https://www.homedepot.com', name: 'Home Depot', loginUrl: 'https://www.homedepot.com/c/login', credentials: { email: 'user@example.com', password: '***' } },
+                                    { url: 'https://www.lowes.com', name: 'Lowes', loginUrl: 'https://www.lowes.com/l/login', credentials: { email: 'otro@example.com', password: '***' } }
                                 ],
                                 maxParallel: 3,
                                 maxStepsPerAgent: 15,
@@ -919,7 +921,7 @@ export function createApiServer(config: {
                         instruction: "buscar precio de taladro DeWalt",
                         targets: [
                             { url: "https://ferreteria1.com", name: "Ferretería A" },
-                            { url: "https://ferreteria2.com", name: "Ferretería B", credentials: { email: "...", password: "..." } }
+                            { url: "https://ferreteria2.com", name: "Ferretería B", loginUrl: "https://ferreteria2.com/login", credentials: { email: "...", password: "..." } }
                         ],
                         maxParallel: 3,
                         maxStepsPerAgent: 15,

@@ -4,6 +4,7 @@
 
 import { chromium, type Browser, type BrowserContext, type Page, type Locator } from 'playwright';
 import { BrowserAdapter } from '../../domain/services/FlowExecutionService.js';
+import { progressiveScroll } from '../../browser/page-waits.js';
 
 
 export interface PlaywrightConfig {
@@ -88,9 +89,13 @@ export class PlaywrightBrowserAdapter implements BrowserAdapter {
 
     async scroll(direction: 'up' | 'down'): Promise<void> {
         if (!this.page) throw new Error('Browser not launched');
-        const amount = direction === 'down' ? 500 : -500;
-        await this.page.mouse.wheel(0, amount);
-        await this.page.waitForTimeout(300);
+        await progressiveScroll(this.page, {
+            direction,
+            stepPx: 500,
+            waitBetweenMs: 300,
+            maxSteps: direction === 'down' ? 10 : 3,
+            stopWhenNoNewContent: true
+        });
     }
 
     async screenshot(path: string): Promise<string> {

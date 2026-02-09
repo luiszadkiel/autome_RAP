@@ -4,6 +4,8 @@ import { WebAgent } from './web-agent.js';
 export interface ParallelTarget {
     url: string;
     name: string;
+    /** URL donde el agente debe ir para iniciar sesión (si difiere de url). Si hay credentials y loginUrl, se navega primero a loginUrl. */
+    loginUrl?: string;
     credentials?: {
         email?: string;
         username?: string;
@@ -175,6 +177,7 @@ export class ParallelAgent {
                 url: target.url,
                 instruction: instruction,
                 credentials: target.credentials,
+                loginUrl: target.loginUrl,
                 context: context
             });
 
@@ -214,6 +217,13 @@ export class ParallelAgent {
         }
     }
 
+    /** Decodifica escapes Unicode (\uXXXX) en el texto para mostrar correctamente en el resumen. */
+    private decodeUnicodeEscapes(text: string): string {
+        return text.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
+            String.fromCharCode(parseInt(hex, 16))
+        );
+    }
+
     private generateComparison(instruction: string, results: ParallelTargetResult[]): string {
         const resultsWithInfo = results.filter(r => r.extractedInfo.length > 0);
 
@@ -221,11 +231,30 @@ export class ParallelAgent {
         summary += `${'='.repeat(50)}\n`;
         summary += `🎯 Objetivo: ${instruction}\n\n`;
 
-        summary += `Sitios consultados:\n`;
+        summary += `Sitios consultados: ${results.length}\n`;
         for (const r of results) {
             const status = r.status === 'success' ? '✓' : r.status === 'error' ? '✗' : '−';
             const info = r.extractedInfo.length > 0 ? ` (${r.extractedInfo.length} dato(s))` : '';
             summary += `   ${status} ${r.target}${info}\n`;
+        }
+        summary += '\n';
+
+        // Resumen por sitio: que TODOS los sitios consultados aparezcan con lo que aportaron (o "sin datos")
+        summary += `📌 Resumen por sitio (todos los consultados):\n`;
+        for (const r of results) {
+            const n = r.extractedInfo.length;
+            if (n === 0) {
+                summary += `   • ${r.target}: sin información extraída\n`;
+            } else {
+                const byTypeCount: Record<string, number> = {};
+                for (const info of r.extractedInfo) {
+                    byTypeCount[info.type] = (byTypeCount[info.type] || 0) + 1;
+                }
+                const parts = Object.entries(byTypeCount)
+                    .map(([t, c]) => `${t}: ${c}`)
+                    .join(', ');
+                summary += `   • ${r.target}: ${n} dato(s) — ${parts}\n`;
+            }
         }
         summary += '\n';
 
@@ -243,46 +272,68 @@ export class ParallelAgent {
                 }
                 byType[info.type].push({
                     target: result.target,
-                    content: info.content
+                    content: this.decodeUnicodeEscapes(info.content)
                 });
             }
         }
 
-        for (const [type, items] of Object.entries(byType)) {
-            summary += `📦 [${type.toUpperCase()}]\n`;
+        // Orden: tipos que contengan "price"/"precio" primero, luego el resto (orden estable por nombre)
+        const typeNames = Object.keys(byType).filter(t => byType[t]?.length);
+        const priceLike = typeNames.filter(t => /price|precio/i.test(t));
+        const rest = typeNames.filter(t => !/price|precio/i.test(t)).sort((a, b) => a.localeCompare(b));
+        const orderedTypes = [...priceLike, ...rest];
+
+        for (const type of orderedTypes) {
+            const items = byType[type];
+            if (!items || items.length === 0) continue;
+            const typeLabel = type.toUpperCase();
+            summary += `📦 [${typeLabel}]\n`;
             for (const item of items) {
                 summary += `   • ${item.target}: ${item.content}\n`;
             }
             summary += '\n';
         }
 
-        const priceItems = byType['price'] || byType['precio'] || [];
+        const priceItems = Object.entries(byType)
+            .filter(([t]) => /price|precio/i.test(t))
+            .flatMap(([, items]) => items);
 
-        if (priceItems.length >= 1) {
-            const prices = priceItems.map(item => {
-                const match = item.content.match(/[\$€£]?\s*(\d+[.,]?\d*)/);
+        // Solo considerar para "mejor precio" entradas que sean precios reales (tienen moneda) y no mensajes de error
+        const noPricePhrases = /no (fue )?especificado|no se (encontr[oó]|pudo)|se necesita revisar|informaci[oó]n\.?\s*$/i;
+        const hasCurrency = /RD\s*\$|[\$€£]\s*\d|desde\s*RD\s*\$|precio\s*[:=]?\s*RD\s*\$/i;
+        const priceItemsValid = priceItems.filter(
+            item => !noPricePhrases.test(item.content) && hasCurrency.test(item.content)
+        );
+
+        if (priceItemsValid.length >= 1) {
+            const prices = priceItemsValid.map(item => {
+                const match = item.content.match(/RD\s*\$\s*([\d.,]+)|[\$€£]\s*([\d.,]+)/i) ||
+                    item.content.match(/(\d+[.,]\d+)\s*(?:RD|\$|€|£)/i);
+                const raw = match ? (match[1] || match[2] || '') : '';
+                const numStr = raw.replace(/,/g, ''); // quitar comas de miles
+                const price = numStr ? parseFloat(numStr) : Infinity;
                 return {
                     target: item.target,
-                    price: match ? parseFloat(match[1].replace(',', '.')) : Infinity,
+                    price: Number.isFinite(price) ? price : Infinity,
                     original: item.content
                 };
-            }).filter(p => p.price !== Infinity);
+            }).filter(p => p.price !== Infinity && p.price > 0);
 
             if (prices.length >= 1) {
                 prices.sort((a, b) => a.price - b.price);
-                summary += `💰 MEJOR PRECIO: ${prices[0].target} (${prices[0].original})\n`;
+                summary += `💰 MEJOR PRECIO (menor valor encontrado): ${prices[0].target} — ${prices[0].original}\n`;
+                if (prices.length > 1) {
+                    summary += `   Otros: ${prices.slice(1, 4).map(p => `${p.target} (${p.original})`).join(' | ')}\n`;
+                }
             }
         }
 
-        const productTypes = ['result', 'product', 'producto'];
-        const targetsWithProductNoPrice = resultsWithInfo.filter(r => {
-            const hasPrice = r.extractedInfo.some(i => i.type === 'price' || i.type === 'precio');
-            const hasProduct = r.extractedInfo.some(i => productTypes.includes(i.type));
-            return !hasPrice && hasProduct;
-        }).map(r => r.target);
-        if (targetsWithProductNoPrice.length > 0) {
-            summary += `\n📌 Sitios con producto encontrado pero precio no visible:\n`;
-            for (const t of targetsWithProductNoPrice) {
+        const hasPriceType = (r: ParallelTargetResult) =>
+            r.extractedInfo.some(i => /price|precio/i.test(i.type));
+        const targetsWithInfoNoPrice = resultsWithInfo.filter(r => !hasPriceType(r)).map(r => r.target);
+        if (targetsWithInfoNoPrice.length > 0) {
+            summary += `\n📌 Sitios con información extraída pero sin dato de precio:\n`;
+            for (const t of targetsWithInfoNoPrice) {
                 summary += `   • ${t}\n`;
             }
         }

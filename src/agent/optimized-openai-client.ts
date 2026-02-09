@@ -26,14 +26,33 @@ export interface BatchDecision {
     reason?: string;
 }
 
+export interface OpenAIClientOptions {
+    /** Modelo principal (default: gpt-4o) */
+    model?: string;
+    /** Máximo de tokens en la respuesta (default: 1200) */
+    maxTokens?: number;
+    /** Usar gpt-4o-mini en pasos "simples" (pocos elementos, sin modal) para ahorrar costo */
+    useMiniForSimpleSteps?: boolean;
+}
+
+const DEFAULT_MODEL = 'gpt-4o';
+const DEFAULT_MAX_TOKENS = 1200;
+const SIMPLE_STEP_MAX_ELEMENTS = 6;
+
 export class OptimizedOpenAIClient {
     private client: OpenAI;
     private conversationHistory: { role: 'system' | 'user' | 'assistant'; content: string }[] = [];
     private formatter: SnapshotFormatter;
+    private options: Required<Pick<OpenAIClientOptions, 'model' | 'maxTokens'>> & Pick<OpenAIClientOptions, 'useMiniForSimpleSteps'>;
 
-    constructor(apiKey: string) {
+    constructor(apiKey: string, options?: OpenAIClientOptions) {
         this.client = new OpenAI({ apiKey });
         this.formatter = new SnapshotFormatter();
+        this.options = {
+            model: options?.model ?? DEFAULT_MODEL,
+            maxTokens: options?.maxTokens ?? DEFAULT_MAX_TOKENS,
+            useMiniForSimpleSteps: options?.useMiniForSimpleSteps ?? false
+        };
     }
 
     async planActions(
@@ -60,18 +79,24 @@ export class OptimizedOpenAIClient {
             currentUrl: snapshot.url
         });
 
+        const model = this.options.useMiniForSimpleSteps &&
+            !snapshot.pageState?.hasModal &&
+            (snapshot.meta?.elementCount ?? 0) <= SIMPLE_STEP_MAX_ELEMENTS
+            ? 'gpt-4o-mini'
+            : this.options.model;
+
         // 2. Llamar a OpenAI
         try {
             const response = await this.client.chat.completions.create({
-                model: 'gpt-4-turbo-preview', // Capaz de JSON mode complejo
+                model,
                 messages: [
                     { role: 'system', content: systemPrompt },
-                    ...this.conversationHistory.slice(-4), // Mantener contexto breve
+                    ...this.conversationHistory.slice(-4),
                     { role: 'user', content: userPrompt }
                 ],
                 response_format: { type: 'json_object' },
-                temperature: 0.1, // Determinístico
-                max_tokens: 600,  // Suficiente para múltiples acciones
+                temperature: 0.1,
+                max_tokens: this.options.maxTokens,
                 top_p: 0.95
             });
 

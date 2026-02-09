@@ -5,6 +5,7 @@ import { ActionVerifier, VerificationResult } from './action-verifier.js';
 import { ElementResolver } from '../browser/element-resolver.js';
 import { OptimizedSnapshot } from '../browser/optimized-snapshot.js';
 import { SiteAdapter } from '../browser/site-adapters/base-adapter.js';
+import { waitForPageReady, progressiveScroll } from '../browser/page-waits.js';
 
 export interface BatchExecutionResult {
     totalActions: number;
@@ -303,8 +304,13 @@ export class BatchActionExecutor {
                 break;
 
             case 'scroll':
-                const amount = action.value === 'up' ? -400 : 400;
-                await page.evaluate((y) => window.scrollBy(0, y), amount);
+                await progressiveScroll(page, {
+                    direction: action.value === 'up' ? 'up' : 'down',
+                    stepPx: 400,
+                    waitBetweenMs: 350,
+                    maxSteps: action.value === 'up' ? 4 : 12,
+                    stopWhenNoNewContent: true
+                });
                 break;
 
             case 'wait':
@@ -342,10 +348,9 @@ export class BatchActionExecutor {
                 // Navegar hacia atrás en el historial del navegador
                 console.log('   🔙 Navegando hacia atrás...');
                 await page.goBack({ waitUntil: 'networkidle', timeout: 10000 }).catch(() => {
-                    // Si goBack falla, intentar navegar a la URL anterior conocida
                     console.log('   ⚠️ goBack falló, esperando...');
                 });
-                await page.waitForTimeout(1000);
+                await waitForPageReady(page, { timeout: 5000 });
                 break;
 
             default:
@@ -357,60 +362,41 @@ export class BatchActionExecutor {
         // Tiempos base
         const baseWait = 300;
 
-        // Si hay formulario de búsqueda tipo modal (Elementor full-screen u otro): dar tiempo a que se abra tras un click
+        // Si hay formulario de búsqueda tipo modal: dar tiempo a que se abra tras un click
         if (action.action === 'click') {
             const hasSearchModal = await page.evaluate(() => !!document.querySelector(
                 '.elementor-search-form, [class*="search-form__container"], .search-form.fullscreen, [class*="search"] [class*="modal"]'
             )).catch(() => false);
             if (hasSearchModal) {
-                await page.waitForTimeout(500);
+                await this.safeWait(page, 500);
             }
         }
 
-        // Estrategia de espera basada en el tipo de acción
+        // Espera inteligente: página lista (readyState + sin loaders) en lugar de timeout fijo
         if (action.action === 'type' || action.action === 'click') {
             try {
-                // Esperar a que el DOM se estabilice (silencio de mutaciones)
-                await page.evaluate(() => {
-                    return new Promise<void>((resolve) => {
-                        let timeout: any;
-                        const observer = new MutationObserver(() => {
-                            clearTimeout(timeout);
-                            // Reiniciar temporizador si hubo cambios
-                            timeout = setTimeout(() => {
-                                observer.disconnect();
-                                resolve();
-                            }, 500); // 500ms de silencio requerido
-                        });
-
-                        observer.observe(document.body, {
-                            childList: true,
-                            subtree: true,
-                            attributes: true,
-                            attributeFilter: ['class', 'style', 'aria-expanded', 'hidden']
-                        });
-
-                        // Timeout de seguridad máximo por si la página tiene animaciones infinitas
-                        setTimeout(() => {
-                            observer.disconnect();
-                            resolve();
-                        }, 2000);
-                    });
-                });
-            } catch (e) {
-                // Fallback seguro si falla el observer
-                await page.waitForTimeout(1000);
+                await waitForPageReady(page, { timeout: 4000 });
+            } catch {
+                await this.safeWait(page, 400);
             }
         } else {
-            // Para otras acciones (scroll, etc), espera simple
-            await page.waitForTimeout(baseWait);
+            await this.safeWait(page, baseWait);
         }
 
-        // Si fue un click, dar un extra por si hay redirección
         if (action.action === 'click') {
             try {
                 await page.waitForLoadState('networkidle', { timeout: 2000 }).catch(() => { });
             } catch { }
+        }
+    }
+
+    /** Espera sin lanzar si la página/contexto/browser ya fue cerrado (ej. ejecución paralela). */
+    private async safeWait(page: Page, ms: number): Promise<void> {
+        try {
+            await page.waitForTimeout(ms);
+        } catch (e: any) {
+            if (e?.message?.includes('has been closed')) return;
+            throw e;
         }
     }
 
