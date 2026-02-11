@@ -182,7 +182,7 @@ export class WebAgent {
                             this.capturedApiData.shift();
                         }
                     }
-                } catch (_) {}
+                } catch (_) { }
             });
 
             // 2. Navegar a URL inicial (loginUrl si existe, si no url) con fallback de estrategias
@@ -442,7 +442,8 @@ export class WebAgent {
                     decision,
                     snapshot,
                     this.siteAdapter,
-                    this.context!
+                    this.context!,
+                    structuredData.credentials
                 );
 
                 // Si se abrió una nueva pestaña, actualizar la referencia

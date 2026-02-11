@@ -34,7 +34,8 @@ export class BatchActionExecutor {
         batch: BatchDecision,
         snapshot: OptimizedSnapshot,
         siteAdapter: SiteAdapter | null,
-        context?: BrowserContext
+        context?: BrowserContext,
+        credentials?: { email?: string; password?: string }
     ): Promise<BatchExecutionResult> {
         const results: BatchExecutionResult['results'] = [];
         let stop = false;
@@ -64,7 +65,7 @@ export class BatchActionExecutor {
                 // 2. Ejecutar acción (con detección de nueva pestaña para clicks)
                 if (action.action === 'click' && context) {
                     const result = await this.executeClickWithTabDetection(
-                        currentPage, action, snapshot, siteAdapter, context
+                        currentPage, action, snapshot, siteAdapter, context, credentials
                     );
                     if (result.newPage) {
                         console.log(`   📑 Nueva pestaña detectada, cambiando contexto...`);
@@ -72,7 +73,7 @@ export class BatchActionExecutor {
                         newPageOpened = result.newPage;
                     }
                 } else {
-                    await this.executeSingleAction(currentPage, action, snapshot, siteAdapter);
+                    await this.executeSingleAction(currentPage, action, snapshot, siteAdapter, credentials);
                 }
 
                 // 3. Espera inteligente
@@ -125,13 +126,14 @@ export class BatchActionExecutor {
         action: ActionDecision,
         snapshot: OptimizedSnapshot,
         siteAdapter: SiteAdapter | null,
-        context: BrowserContext
+        context: BrowserContext,
+        credentials?: { email?: string; password?: string }
     ): Promise<{ newPage?: Page }> {
         // Escuchar evento de nueva página ANTES de hacer click
         const newPagePromise = context.waitForEvent('page', { timeout: 3000 }).catch(() => null);
 
         // Ejecutar el click normal
-        await this.executeSingleAction(page, action, snapshot, siteAdapter);
+        await this.executeSingleAction(page, action, snapshot, siteAdapter, credentials);
 
         // Verificar si se abrió nueva pestaña
         const newPage = await newPagePromise;
@@ -150,7 +152,8 @@ export class BatchActionExecutor {
         page: Page,
         action: ActionDecision,
         snapshot: OptimizedSnapshot,
-        siteAdapter: SiteAdapter | null
+        siteAdapter: SiteAdapter | null,
+        credentials?: { email?: string; password?: string }
     ): Promise<void> {
 
         // Resolver elemento si aplica
@@ -247,10 +250,10 @@ export class BatchActionExecutor {
                             console.log('   ⌨️ Intentando cerrar modal con Escape...');
                             await page.keyboard.press('Escape');
                             await page.waitForTimeout(500);
-                            
+
                             try {
                                 // Reintentar después de Escape
-                                await locator.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {});
+                                await locator.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => { });
                                 await locator.click({ timeout: 5000, noWaitAfter: true });
                                 console.log('   ✅ Click exitoso después de cerrar modal');
                             } catch {
@@ -277,23 +280,88 @@ export class BatchActionExecutor {
 
             case 'type':
                 if (!locator) throw new Error('Type requiere referencia válida');
-                // Limpiar campo primero y luego escribir
-                await locator.clear().catch(() => { }); // Ignorar si no se puede limpiar
 
-                try {
-                    await locator.fill(action.value || '');
-                } catch (fillError: any) {
-                    // Si falla porque no es un input (ej: el LLM intentó escribir en el botón que abre el input)
-                    if (fillError.message.includes('Element is not an <input>')) {
-                        console.log('   ⚠️ Elemento no es input, intentando escribir en elemento activo...');
+                // Determinar el valor real a escribir
+                let valueToType = action.value || '';
+                const targetElement = snapshot.elements.find(e => e.ref === action.ref);
 
-                        // Intentar escribir en lo que sea que tenga el foco (probablemente el input que se abrió al hacer click antes)
-                        await page.keyboard.type(action.value || '');
+                // Detectar si estamos en una página de login
+                const isLoginPage = /\/(login|signin|auth|iniciar|acceder|front-end\/login|consumer\/login)/i.test(page.url());
 
-                        // Si no funcionó (no hubo cambio de foco), buscar un input alternativo
-                        // Opcional: Validar si se escribió algo
-                    } else {
-                        throw fillError;
+                if (isLoginPage && targetElement && credentials) {
+                    // Inyectar credenciales reales en campos de login
+                    if (targetElement.type === 'password' && credentials.password) {
+                        valueToType = credentials.password;
+                        console.log('   🔐 Inyectando contraseña real en campo password');
+                    } else if (
+                        (targetElement.type === 'email' || targetElement.type === 'text' || !targetElement.type) &&
+                        targetElement.isInput &&
+                        credentials.email &&
+                        // Heurística: el campo parece ser de email/usuario
+                        (targetElement.placeholder?.toLowerCase().includes('email') ||
+                            targetElement.placeholder?.toLowerCase().includes('correo') ||
+                            targetElement.placeholder?.toLowerCase().includes('usuario') ||
+                            targetElement.placeholder?.toLowerCase().includes('user') ||
+                            targetElement.name?.toLowerCase().includes('email') ||
+                            targetElement.name?.toLowerCase().includes('user') ||
+                            targetElement.label?.toLowerCase().includes('email') ||
+                            targetElement.label?.toLowerCase().includes('correo') ||
+                            targetElement.label?.toLowerCase().includes('usuario') ||
+                            targetElement.id?.toLowerCase().includes('email') ||
+                            targetElement.id?.toLowerCase().includes('user') ||
+                            targetElement.type === 'email')
+                    ) {
+                        valueToType = credentials.email;
+                        console.log('   📧 Inyectando email real en campo de usuario');
+                    }
+                }
+
+                if (isLoginPage) {
+                    // En login: usar click + pressSequentially para máxima compatibilidad con SPAs
+                    // fill() no dispara keydown/keyup/input events que Angular/React necesitan
+                    try {
+                        await locator.click({ timeout: 3000 }).catch(() => { });
+                        await locator.clear().catch(() => { });
+                        await locator.pressSequentially(valueToType, { delay: 30 });
+                        console.log('   ⌨️ Login: escrito con pressSequentially (SPA compatible)');
+
+                        // Si es campo password, presionar Enter para enviar el formulario
+                        // Muchos SPAs no reaccionan al click del botón pero sí a Enter
+                        if (targetElement?.type === 'password') {
+                            await page.waitForTimeout(200);
+                            await page.keyboard.press('Enter');
+                            console.log('   ⏎ Login: Enter presionado después de contraseña');
+                        }
+                    } catch (loginTypeError: any) {
+                        // Fallback a fill() si pressSequentially falla
+                        console.log('   🔄 pressSequentially falló en login, intentando fill()...');
+                        await locator.clear().catch(() => { });
+                        await locator.fill(valueToType);
+                        if (targetElement?.type === 'password') {
+                            await page.waitForTimeout(200);
+                            await page.keyboard.press('Enter');
+                        }
+                    }
+                } else {
+                    // Fuera de login: usar fill() (más rápido) con fallback a pressSequentially
+                    await locator.clear().catch(() => { }); // Ignorar si no se puede limpiar
+
+                    try {
+                        await locator.fill(valueToType);
+                    } catch (fillError: any) {
+                        if (fillError.message.includes('Element is not an <input>')) {
+                            console.log('   ⚠️ Elemento no es input, intentando escribir en elemento activo...');
+                            await page.keyboard.type(valueToType);
+                        } else {
+                            // Fallback: pressSequentially para frameworks SPA
+                            console.log('   🔄 fill() falló, intentando pressSequentially...');
+                            try {
+                                await locator.clear().catch(() => { });
+                                await locator.pressSequentially(valueToType, { delay: 30 });
+                            } catch {
+                                throw fillError;
+                            }
+                        }
                     }
                 }
                 break;
@@ -384,9 +452,20 @@ export class BatchActionExecutor {
         }
 
         if (action.action === 'click') {
+            const isLogin = /\/(login|signin|auth|iniciar|acceder|front-end\/login|consumer\/login)/i.test(page.url());
             try {
-                await page.waitForLoadState('networkidle', { timeout: 2000 }).catch(() => { });
+                const networkTimeout = isLogin ? 5000 : 2000;
+                await page.waitForLoadState('networkidle', { timeout: networkTimeout }).catch(() => { });
             } catch { }
+            // En login: esperar posible navegación a página post-login
+            if (isLogin) {
+                try {
+                    await page.waitForURL(
+                        url => !/\/(login|signin|auth|iniciar|acceder|front-end\/login|consumer\/login)/i.test(url.toString()),
+                        { timeout: 5000 }
+                    );
+                } catch { /* aún en login, ok; loginVerifier se encarga */ }
+            }
         }
     }
 
@@ -523,7 +602,7 @@ export class BatchActionExecutor {
      */
     private async tryCloseModal(page: Page): Promise<boolean> {
         console.log('   🔄 Intentando cerrar modal automáticamente...');
-        
+
         // Estrategia 1: Buscar botón de cerrar común
         const closeSelectors = [
             'button[aria-label*="close" i]',

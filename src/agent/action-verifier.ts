@@ -90,8 +90,9 @@ export class ActionVerifier {
         context: ActionContext,
         preState: PreActionState
     ): Promise<VerificationResult> {
-        // 1. Esperar estabilidad (máximo 3 segundos)
-        await this.waitForStability(page, 3000);
+        // 1. Esperar estabilidad (máximo 3 segundos, 5s en login)
+        const isLoginCtx = this.isLoginPage(preState.url);
+        await this.waitForStability(page, 3000, isLoginCtx);
 
         const evidence = {
             domChanged: false,
@@ -134,12 +135,13 @@ export class ActionVerifier {
     /**
      * Espera hasta que la página esté estable
      */
-    private async waitForStability(page: Page, maxWait: number): Promise<void> {
+    private async waitForStability(page: Page, maxWait: number, isLoginContext?: boolean): Promise<void> {
+        const effectiveMaxWait = isLoginContext ? Math.max(maxWait, 5000) : maxWait;
         const startTime = Date.now();
         let lastHtmlLength = 0;
         let stableCount = 0;
 
-        while (Date.now() - startTime < maxWait && stableCount < 3) {
+        while (Date.now() - startTime < effectiveMaxWait && stableCount < 3) {
             // Esperar un poco
             await page.waitForTimeout(150);
 
@@ -387,9 +389,9 @@ export class ActionVerifier {
                 }
                 if (!evidence.domChanged && !evidence.urlChanged) {
                     if (onLoginPage) {
-                        // En login: no penalizar fuerte; el envío puede ser asíncrono
-                        confidence -= 5;
-                        reasons.push('Sin cambios visibles aún (login puede estar procesando)');
+                        // En login: asumir éxito optimista; la verificación real la hace loginVerifier
+                        confidence += 10;
+                        reasons.push('Login click: asumiendo envío asíncrono exitoso (verificación posterior)');
                     } else {
                         confidence -= 30;
                         reasons.push('No hubo cambios visibles');

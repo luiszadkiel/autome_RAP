@@ -18,8 +18,14 @@ export class LoginVerifier {
         const currentUrl = page.url();
 
         if (currentUrl !== loginUrl && !this.isLoginRelatedUrl(currentUrl)) {
-            confidence += 40;
-            evidence.push(`URL cambió de login a: ${currentUrl}`);
+            // Rechazar about:blank y páginas vacías como login exitoso
+            if (/^(about:blank|about:srcdoc|chrome:|data:)/i.test(currentUrl)) {
+                confidence -= 30;
+                evidence.push(`URL inválida post-login: ${currentUrl}`);
+            } else {
+                confidence += 40;
+                evidence.push(`URL cambió de login a: ${currentUrl}`);
+            }
         } else {
             confidence -= 20;
             evidence.push('URL sigue siendo la página de login');
