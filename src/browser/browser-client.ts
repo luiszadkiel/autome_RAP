@@ -1104,18 +1104,25 @@ export class BrowserClient {
         if (!this.page) return;
 
         const commonSelectors = [
-            // Cookie banners
+            // GDPR/Cookie consent banners (prioridad: Accept All primero)
+            '#consent_prompt_submit',  // Accept All button
             '#onetrust-accept-btn-handler',
+            '#consent_prompt_reject',  // Reject All (solo si Accept no existe)
             '#onetrust-reject-all-handler',
             '.cc-btn',
             '[aria-label="Accept cookies"]',
             'button:has-text("Accept all")',
+            'button:has-text("Accept All")',
             'button:has-text("Agree")',
             'button:has-text("I agree")',
             'button:has-text("Aceptar")',
             'button:has-text("Acepto")',
+            'button:has-text("Aceptar todas")',
+            'div[role="button"]:has-text("Accept All")',
+            'div[role="button"]:has-text("Aceptar")',
 
-            // Close buttons
+            // Close buttons (incluyendo GDPR específicos)
+            '.close_btn_thick',  // GDPR close button
             '[aria-label="Close"]',
             '[aria-label="Cerrar"]',
             'button.close',
@@ -1132,18 +1139,50 @@ export class BrowserClient {
             '.modal-backdrop',
             '[class*="overlay"]',
             '[class*="modal"] button[class*="close"]',
+            '.gdprActive .close_btn_thick',  // GDPR específico
+            '.privacy_prompt .close_btn_thick',  // Privacy prompt específico
 
             // Loading spinners (click to dismiss if clickable)
             '.loading-overlay',
         ];
 
+        // Priorizar botones "Accept All" sobre "Reject All"
+        const acceptSelectors = [
+            '#consent_prompt_submit',
+            '#onetrust-accept-btn-handler',
+            'button:has-text("Accept all")',
+            'button:has-text("Accept All")',
+            'div[role="button"]:has-text("Accept All")',
+            'button:has-text("Aceptar todas")',
+            'button:has-text("Aceptar")',
+            'button:has-text("Acepto")',
+        ];
+
+        // Intentar primero con botones de aceptar
+        for (const selector of acceptSelectors) {
+            try {
+                const locator = this.page.locator(selector);
+                if (await locator.count() > 0 && await locator.first().isVisible()) {
+                    await locator.first().click({ timeout: 500 }).catch(() => { });
+                    console.log('   🍪 Banner de cookies aceptado');
+                    await this.page.waitForTimeout(500);
+                    return; // Salir si se aceptó exitosamente
+                }
+            } catch { /* continuar con siguiente selector */ }
+        }
+
+        // Si no se encontró botón de aceptar, intentar otros selectores
         for (const selector of commonSelectors) {
+            // Saltar selectores de aceptar que ya probamos
+            if (acceptSelectors.includes(selector)) continue;
+            
             try {
                 const locator = this.page.locator(selector);
                 if (await locator.count() > 0 && await locator.first().isVisible()) {
                     await locator.first().click({ timeout: 500 }).catch(() => { });
                     console.log('   🚫 Dismissed overlay/popup');
                     await this.page.waitForTimeout(300);
+                    return; // Salir después de cerrar
                 }
             } catch { /* ignore */ }
         }

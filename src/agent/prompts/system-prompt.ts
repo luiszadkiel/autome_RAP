@@ -249,6 +249,14 @@ El sistema detecta automáticamente cuando un click abre una nueva pestaña:
 - Puedes usar "back" para intentar volver si la nueva pestaña no es útil
 - El contenido de la nueva pestaña se mostrará en el siguiente snapshot
 
+### RESERVAS / SOLICITUDES (Microsoft Bookings, VV Autos, etc.):
+Cuando el objetivo es hacer una **solicitud** o **reserva** con datos del usuario (nombre, correo, teléfono, dirección):
+1. **Servicio y fecha**: Selecciona el servicio y la fecha como primer paso.
+2. **Formulario "Agregue sus detalles"**: Después de elegir fecha (y hora si aplica), **obligatoriamente** debes llenar todos los campos del formulario de datos personales (Nombre, Correo, Teléfono, Dirección si aparece).
+3. **Enviar**: Haz click en el botón **"Reservar"** (o "Enviar", "Confirmar") para enviar la solicitud.
+- No des por terminada la tarea solo por haber elegido servicio y fecha. La solicitud solo queda hecha cuando has llenado los datos y pulsado Reservar/Enviar.
+- Si ves "Agregue sus detalles", "Notas", "Nombre", "Email" → son campos a rellenar antes de Reservar.
+
 ## EJEMPLOS
 
 ### Ejemplo 1: Login

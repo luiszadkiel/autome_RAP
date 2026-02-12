@@ -393,10 +393,16 @@ export class ActionVerifier {
                         confidence += 10;
                         reasons.push('Login click: asumiendo envío asíncrono exitoso (verificación posterior)');
                     } else {
-                        confidence -= 30;
-                        reasons.push('No hubo cambios visibles');
-                        shouldRetry = true;
-                        suggestedAction = 'Intentar doble click o verificar si el elemento es clickeable';
+                        // Click sin cambio visible: puede ser SPA/panel/menú que no cambia URL. No bloquear el batch.
+                        confidence -= 15;
+                        reasons.push('No hubo cambios visibles (puede ser panel o menú SPA)');
+                        if (!evidence.errorsDetected.length) {
+                            confidence += 10;
+                            reasons.push('Sin errores; se continúa');
+                        } else {
+                            shouldRetry = true;
+                            suggestedAction = 'Intentar doble click o verificar si el elemento es clickeable';
+                        }
                     }
                 }
                 break;

@@ -4,6 +4,8 @@ import { WebAgent } from './web-agent.js';
 export interface ParallelTarget {
     url: string;
     name: string;
+    /** Instrucción específica para este target. Si se omite, se usa la instrucción global. */
+    instruction?: string;
     /** URL donde el agente debe ir para iniciar sesión (si difiere de url). Si hay credentials y loginUrl, se navega primero a loginUrl. */
     loginUrl?: string;
     credentials?: {
@@ -14,6 +16,7 @@ export interface ParallelTarget {
 }
 
 export interface ParallelConfig {
+    /** Instrucción por defecto para todos los targets. Obligatoria si algún target no tiene instruction propia. */
     instruction: string;
     targets: ParallelTarget[];
     maxParallel?: number; // 1-10, default 3
@@ -64,20 +67,40 @@ export class ParallelAgent {
         const { instruction, targets } = config;
         const maxParallel = Math.min(Math.max(config.maxParallel || this.maxParallel, 1), 10);
 
+        // Advertencia de rendimiento para muchos agentes
+        if (maxParallel >= 7) {
+            console.log(`\n⚠️  ══════════════════════════════════════════════════════════`);
+            console.log(`   ADVERTENCIA: Ejecutando ${maxParallel} agentes en paralelo`);
+            console.log(`   • Alto consumo de RAM esperado (${maxParallel * 200}-${maxParallel * 400}MB aprox.)`);
+            console.log(`   • Snapshots pueden tardar más`);
+            console.log(`   • Se usarán múltiples navegadores para mejor rendimiento`);
+            console.log(`══════════════════════════════════════════════════════════\n`);
+        }
+
+        const targetsWithOwnInstruction = targets.filter(t => t.instruction?.trim()).length;
         console.log(`\n🚀 ══════════════════════════════════════════════════════════`);
         console.log(`   EJECUCIÓN PARALELA - ${targets.length} objetivos`);
-        console.log(`   📝 Instrucción: ${instruction}`);
+        console.log(`   📝 Instrucción global: ${instruction}`);
+        if (targetsWithOwnInstruction > 0) {
+            console.log(`   📌 ${targetsWithOwnInstruction} target(s) con instrucción propia`);
+        }
         console.log(`   ⚡ Máximo paralelo: ${maxParallel}`);
-        console.log(`   🌐 Navegador compartido activado`);
+        
+        // Estrategia: usar múltiples navegadores si hay muchos agentes
+        const useMultipleBrowsers = maxParallel >= 7;
+        const browsersPerGroup = 3; // Máximo 3 pestañas por navegador para mejor rendimiento
+        
+        if (useMultipleBrowsers) {
+            console.log(`   🌐 Múltiples navegadores (${Math.ceil(maxParallel / browsersPerGroup)} navegadores)`);
+        } else {
+            console.log(`   🌐 Navegador compartido activado`);
+        }
         console.log(`══════════════════════════════════════════════════════════\n`);
 
         const results: ParallelTargetResult[] = [];
-        let browser: Browser | null = null;
+        const browsers: Browser[] = [];
 
         try {
-            // Iniciar navegador compartido
-            browser = await chromium.launch({ headless: this.headless });
-
             // Dividir targets en chunks según maxParallel
             const chunks = this.chunkArray(targets, maxParallel);
 
@@ -85,44 +108,33 @@ export class ParallelAgent {
                 const chunk = chunks[chunkIndex];
                 console.log(`\n📦 Procesando lote ${chunkIndex + 1}/${chunks.length} (${chunk.length} agentes)...`);
 
-                // Ejecutar chunk en paralelo pasando el browser
-                const chunkPromises = chunk.map((target, index) =>
-                    this.runSingleAgent(target, instruction, chunkIndex * maxParallel + index + 1, browser!)
-                );
-
-                const chunkResults = await Promise.allSettled(chunkPromises);
-                const contextsToClose: BrowserContext[] = [];
-
-                for (let i = 0; i < chunkResults.length; i++) {
-                    const settled = chunkResults[i];
-                    const target = chunk[i];
-
-                    if (settled.status === 'fulfilled') {
-                        const { result: agentResult, context } = settled.value;
-                        results.push(agentResult);
-                        if (context) contextsToClose.push(context);
-                    } else {
-                        results.push({
-                            target: target.name,
-                            url: target.url,
-                            status: 'error',
-                            extractedInfo: [],
-                            summary: `Error: ${settled.reason?.message || 'Unknown error'}`,
-                            duration: 0,
-                            error: settled.reason?.message
-                        });
-                    }
-                }
-
-                for (const ctx of contextsToClose) {
-                    await ctx.close().catch(() => { });
+                if (useMultipleBrowsers) {
+                    // Estrategia: múltiples navegadores para mejor rendimiento
+                    await this.runChunkWithMultipleBrowsers(
+                        chunk,
+                        instruction,
+                        chunkIndex * maxParallel,
+                        browsersPerGroup,
+                        browsers,
+                        results
+                    );
+                } else {
+                    // Estrategia: navegador único compartido (óptimo para pocos agentes)
+                    await this.runChunkWithSingleBrowser(
+                        chunk,
+                        instruction,
+                        chunkIndex * maxParallel,
+                        browsers,
+                        results
+                    );
                 }
             }
         } catch (fatalError: any) {
             console.error('❌ Error fatal en ejecución paralela:', fatalError);
         } finally {
-            if (browser) {
-                await browser.close();
+            // Cerrar todos los navegadores
+            for (const browser of browsers) {
+                await browser.close().catch(() => { });
             }
         }
 
@@ -153,36 +165,183 @@ export class ParallelAgent {
         };
     }
 
+    private async runChunkWithSingleBrowser(
+        chunk: ParallelTarget[],
+        instruction: string,
+        startIndex: number,
+        browsers: Browser[],
+        results: ParallelTargetResult[]
+    ): Promise<void> {
+        // Crear navegador si no existe
+        if (browsers.length === 0) {
+            browsers.push(await chromium.launch({ 
+                headless: this.headless,
+                args: ['--disable-dev-shm-usage', '--disable-setuid-sandbox']
+            }));
+        }
+        const browser = browsers[0];
+
+                // Ejecutar chunk en paralelo
+                const chunkPromises = chunk.map((target, index) =>
+                    this.runSingleAgent(target, instruction, startIndex + index + 1, browser, false)
+                );
+
+        const chunkResults = await Promise.allSettled(chunkPromises);
+        const contextsToClose: BrowserContext[] = [];
+
+        for (let i = 0; i < chunkResults.length; i++) {
+            const settled = chunkResults[i];
+            const target = chunk[i];
+
+            if (settled.status === 'fulfilled') {
+                const { result: agentResult, context } = settled.value;
+                results.push(agentResult);
+                if (context) contextsToClose.push(context);
+            } else {
+                results.push({
+                    target: target.name,
+                    url: target.url,
+                    status: 'error',
+                    extractedInfo: [],
+                    summary: `Error: ${settled.reason?.message || 'Unknown error'}`,
+                    duration: 0,
+                    error: settled.reason?.message
+                });
+            }
+        }
+
+        // Cerrar contextos inmediatamente para liberar memoria
+        await Promise.all(contextsToClose.map(ctx => ctx.close().catch(() => { })));
+    }
+
+    private async runChunkWithMultipleBrowsers(
+        chunk: ParallelTarget[],
+        instruction: string,
+        startIndex: number,
+        browsersPerGroup: number,
+        browsers: Browser[],
+        results: ParallelTargetResult[]
+    ): Promise<void> {
+        // Dividir chunk en grupos de navegadores
+        const browserGroups = this.chunkArray(chunk, browsersPerGroup);
+
+        for (let groupIndex = 0; groupIndex < browserGroups.length; groupIndex++) {
+            const group = browserGroups[groupIndex];
+            
+            // Crear navegador para este grupo si no existe
+            if (browsers.length <= groupIndex) {
+                browsers.push(await chromium.launch({ 
+                    headless: this.headless,
+                    args: [
+                        '--disable-dev-shm-usage',
+                        '--disable-setuid-sandbox',
+                        '--disable-gpu',
+                        '--no-sandbox',
+                        '--disable-software-rasterizer',
+                        '--disable-extensions'
+                    ]
+                }));
+            }
+            const browser = browsers[groupIndex];
+
+            // Ejecutar grupo en paralelo
+            const groupPromises = group.map((target, index) =>
+                this.runSingleAgent(
+                    target, 
+                    instruction, 
+                    startIndex + groupIndex * browsersPerGroup + index + 1, 
+                    browser,
+                    true // Optimizar para muchos agentes
+                )
+            );
+
+            const groupResults = await Promise.allSettled(groupPromises);
+            const contextsToClose: BrowserContext[] = [];
+
+            for (let i = 0; i < groupResults.length; i++) {
+                const settled = groupResults[i];
+                const target = group[i];
+
+                if (settled.status === 'fulfilled') {
+                    const { result: agentResult, context } = settled.value;
+                    results.push(agentResult);
+                    if (context) contextsToClose.push(context);
+                } else {
+                    results.push({
+                        target: target.name,
+                        url: target.url,
+                        status: 'error',
+                        extractedInfo: [],
+                        summary: `Error: ${settled.reason?.message || 'Unknown error'}`,
+                        duration: 0,
+                        error: settled.reason?.message
+                    });
+                }
+            }
+
+            // Cerrar contextos inmediatamente para liberar memoria
+            await Promise.all(contextsToClose.map(ctx => ctx.close().catch(() => { })));
+            
+            // Pequeña pausa entre grupos para evitar sobrecarga
+            if (groupIndex < browserGroups.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+        }
+    }
+
     private async runSingleAgent(
         target: ParallelTarget,
-        instruction: string,
+        globalInstruction: string,
         agentNumber: number,
-        browser: Browser
+        browser: Browser,
+        optimizeForManyAgents: boolean = false
     ): Promise<{ result: ParallelTargetResult; context?: BrowserContext }> {
         const startTime = Date.now();
-        console.log(`   🤖 Agente #${agentNumber} iniciando: ${target.name} (${target.url})`);
+        const instruction = (target.instruction?.trim() || globalInstruction).trim();
+        if (target.instruction?.trim()) {
+            console.log(`   🤖 Agente #${agentNumber} iniciando: ${target.name} (instrucción propia)`);
+        } else {
+            console.log(`   🤖 Agente #${agentNumber} iniciando: ${target.name} (${target.url})`);
+        }
 
         let context: BrowserContext | undefined;
 
         try {
-            context = await browser.newContext();
+            // Crear contexto con límites de recursos optimizados
+            context = await browser.newContext({
+                viewport: { width: 1280, height: 720 }, // Resolución reducida para ahorrar memoria
+                ignoreHTTPSErrors: true,
+                javaScriptEnabled: true,
+                bypassCSP: true
+                // Nota: Para optimizaciones adicionales con muchos agentes, se pueden deshabilitar
+                // imágenes/fuentes aquí, pero puede afectar la detección visual
+            });
 
             const agent = new WebAgent({
                 openaiApiKey: this.openaiApiKey,
                 headless: this.headless,
-                maxSteps: this.maxStepsPerAgent
+                maxSteps: this.maxStepsPerAgent,
+                // Optimizaciones para ejecución paralela
+                optimizeForParallel: true
             });
 
             const result = await agent.run({
                 url: target.url,
-                instruction: instruction,
+                instruction,
                 credentials: target.credentials,
                 loginUrl: target.loginUrl,
                 context: context
             });
 
             const duration = Date.now() - startTime;
-            const isSuccess = result.success || result.status === 'success';
+            const data = result.data || [];
+            const hasAvailability = data.some((d: { type?: string }) => /availability|disponibilidad|horario/i.test(d.type || ''));
+            const instructionLower = instruction.toLowerCase();
+            const objectiveWasAvailability = /horario|golf|disponible|mañana|reserva/i.test(instructionLower);
+            const isSuccess =
+                result.success ||
+                result.status === 'success' ||
+                (objectiveWasAvailability && hasAvailability);
 
             console.log(`   ${isSuccess ? '✅' : '❌'} Agente #${agentNumber} terminó: ${target.name} (${(duration / 1000).toFixed(1)}s)`);
 
@@ -224,24 +383,69 @@ export class ParallelAgent {
         );
     }
 
+    /**
+     * Filtra y deduplica extractedInfo para evitar información errónea o repetida:
+     * - Excluye HTML crudo (p. ej. página de carga de Outlook Bookings)
+     * - Excluye dumps de propiedades DOM/React (__UNMOUNT, __reactContainer, etc.)
+     * - Excluye contenido demasiado largo (probable dump)
+     * - Deduplica mensajes iguales o muy similares por target
+     */
+    private filterAndDedupeExtractedInfo(
+        items: Array<{ type: string; content: string }>,
+        maxContentLength: number = 1200
+    ): Array<{ type: string; content: string }> {
+        const isHtml = (s: string) => {
+            const t = s.trim();
+            const lower = t.toLowerCase();
+            return lower.startsWith('<!doctype') || lower.startsWith('<html') || /^\s*</.test(t);
+        };
+        const domReactDumpMarkers = [
+            '__UNMOUNT', '__reactContainer', '_reactListening', 'attributeStyleMap',
+            'NamedNodeMap', 'DOMTokenList', 'HTMLCollection', 'NodeList',
+            'stateNode:', 'elementType:', 'nodeType:', 'ownerDocument:'
+        ];
+        const isDomOrReactDump = (s: string) => {
+            const count = domReactDumpMarkers.filter(m => s.includes(m)).length;
+            return count >= 2;
+        };
+        const seen = new Set<string>();
+        const out: Array<{ type: string; content: string }> = [];
+        for (const item of items) {
+            const raw = (item.content || '').trim();
+            if (!raw) continue;
+            if (raw.length > maxContentLength) continue;
+            if (isHtml(raw)) continue;
+            if (isDomOrReactDump(raw)) continue;
+            const key = `${item.type}\n${raw.replace(/\s+/g, ' ').toLowerCase()}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push({ type: item.type, content: item.content });
+        }
+        return out;
+    }
+
     private generateComparison(instruction: string, results: ParallelTargetResult[]): string {
-        const resultsWithInfo = results.filter(r => r.extractedInfo.length > 0);
+        const resultsWithCleanedInfo = results.map(r => ({
+            ...r,
+            extractedInfo: this.filterAndDedupeExtractedInfo(r.extractedInfo)
+        }));
+        const resultsWithInfo = resultsWithCleanedInfo.filter(r => r.extractedInfo.length > 0);
 
         let summary = `\n📋 RESUMEN UNIFICADO\n`;
         summary += `${'='.repeat(50)}\n`;
         summary += `🎯 Objetivo: ${instruction}\n\n`;
 
         summary += `Sitios consultados: ${results.length}\n`;
-        for (const r of results) {
+        for (const r of resultsWithCleanedInfo) {
             const status = r.status === 'success' ? '✓' : r.status === 'error' ? '✗' : '−';
             const info = r.extractedInfo.length > 0 ? ` (${r.extractedInfo.length} dato(s))` : '';
             summary += `   ${status} ${r.target}${info}\n`;
         }
         summary += '\n';
 
-        // Resumen por sitio: que TODOS los sitios consultados aparezcan con lo que aportaron (o "sin datos")
+        // Resumen por sitio (usa info filtrada y deduplicada)
         summary += `📌 Resumen por sitio (todos los consultados):\n`;
-        for (const r of results) {
+        for (const r of resultsWithCleanedInfo) {
             const n = r.extractedInfo.length;
             if (n === 0) {
                 summary += `   • ${r.target}: sin información extraída\n`;

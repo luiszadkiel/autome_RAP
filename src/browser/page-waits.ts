@@ -26,7 +26,7 @@ export async function waitForPageReady(
         },
         loaderSelectors,
         { timeout }
-    ).catch(() => {});
+    ).catch(() => { });
 }
 
 export interface ProgressiveScrollOptions {

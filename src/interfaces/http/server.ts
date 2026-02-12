@@ -912,11 +912,11 @@ export function createApiServer(config: {
         try {
             const body = await c.req.json();
 
-            // Validar campos requeridos
-            if (!body.instruction || !body.targets || !Array.isArray(body.targets)) {
+            // Validar: targets obligatorio; instruction global o por target
+            if (!body.targets || !Array.isArray(body.targets)) {
                 return c.json({
                     success: false,
-                    error: 'Missing required fields: instruction (string) and targets (array)',
+                    error: 'Missing required field: targets (array)',
                     example: {
                         instruction: "buscar precio de taladro DeWalt",
                         targets: [
@@ -930,22 +930,52 @@ export function createApiServer(config: {
                 }, 400);
             }
 
-            if (body.targets.length === 0) {
+            const globalInstruction = typeof body.instruction === 'string' ? body.instruction.trim() : '';
+            const targets = body.targets.map((t: { url: string; name: string; instruction?: string; loginUrl?: string; credentials?: unknown }) => ({
+                url: t.url,
+                name: t.name,
+                instruction: typeof t.instruction === 'string' ? t.instruction.trim() : undefined,
+                loginUrl: t.loginUrl,
+                credentials: t.credentials
+            }));
+
+            const targetsWithoutInstruction = targets.filter((t: { instruction?: string }) => !t.instruction?.length);
+            if (!globalInstruction && targetsWithoutInstruction.length > 0) {
+                return c.json({
+                    success: false,
+                    error: 'Se requiere "instruction" global o que cada target tenga su propio "instruction". Targets sin instrucción: ' +
+                        targetsWithoutInstruction.map((t: { name: string }) => t.name).join(', ')
+                }, 400);
+            }
+            if (globalInstruction && targetsWithoutInstruction.length === 0) {
+                // Todos tienen instrucción propia; la global es fallback por si acaso
+            }
+
+            if (targets.length === 0) {
                 return c.json({
                     success: false,
                     error: 'targets array cannot be empty',
                 }, 400);
             }
 
-            if (body.targets.length > 10) {
+            if (targets.length > 10) {
                 return c.json({
                     success: false,
                     error: 'Maximum 10 targets allowed per request',
                 }, 400);
             }
 
+            // Advertencia y recomendaciones para muchos agentes
+            const maxParallel = body.maxParallel || 3;
+            if (maxParallel >= 7 && body.targets.length >= 7) {
+                console.log(`\n⚠️  ADVERTENCIA: Ejecutando ${maxParallel} agentes en paralelo`);
+                console.log(`   • Se usarán múltiples navegadores para mejor rendimiento`);
+                console.log(`   • Consumo estimado de RAM: ${maxParallel * 200}-${maxParallel * 400}MB`);
+                console.log(`   • Tiempo estimado: ${Math.ceil(body.targets.length / maxParallel) * 30}-${Math.ceil(body.targets.length / maxParallel) * 60}s\n`);
+            }
+
             // Validar cada target
-            for (const target of body.targets) {
+            for (const target of targets) {
                 if (!target.url || !target.name) {
                     return c.json({
                         success: false,
@@ -962,8 +992,8 @@ export function createApiServer(config: {
             });
 
             const result = await parallelAgent.run({
-                instruction: body.instruction,
-                targets: body.targets,
+                instruction: globalInstruction || 'Completar tarea indicada en el sitio.',
+                targets,
                 maxParallel: body.maxParallel
             });
 

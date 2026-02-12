@@ -120,7 +120,7 @@ export class OptimizedSnapshotExtractor {
                     }, maxWaitMs);
                 }),
             { silenceMs, maxWaitMs }
-        ).catch(() => {});
+        ).catch(() => { });
     }
 
     /**
@@ -155,9 +155,9 @@ export class OptimizedSnapshotExtractor {
             const isAccessibilityOnly = (el: HTMLElement): boolean => {
                 const className = el.className || '';
                 // Manejar SVGAnimatedString (para elementos SVG) y strings normales
-                const classLower = typeof className === 'string' ? className.toLowerCase() : 
-                                  (className && (className as any).baseVal ? (className as any).baseVal.toLowerCase() : '');
-                
+                const classLower = typeof className === 'string' ? className.toLowerCase() :
+                    (className && (className as any).baseVal ? (className as any).baseVal.toLowerCase() : '');
+
                 // Patrones de clases de accesibilidad (cubren múltiples frameworks/CMS)
                 // Estos patrones usan .includes() para capturar variaciones como:
                 // - "elementor-screen-only", "wp-screen-reader-text", "bootstrap-sr-only", etc.
@@ -167,31 +167,31 @@ export class OptimizedSnapshotExtractor {
                     'sr-only',          // Bootstrap, Tailwind, Bulma: sr-only, is-sr-only
                     'sronly',           // Variación sin guión: MuiTypography-srOnly
                     'screenreader',     // screenreader-only, screenreader-text
-                    
+
                     // === Visually hidden patterns ===
                     'visually-hidden',  // Bootstrap 5, Vue A11y: visually-hidden
                     'visuallyhidden',   // HTML5 Boilerplate, React Aria
                     'visually_hidden',  // Variación con underscore
-                    
+
                     // === React ecosystem ===
                     'chakra-visually-hidden',  // Chakra UI
                     'css-sronly',              // Emotion/Styled components
                     'rah-',                    // React Aria Hidden: rah-hidden
-                    
+
                     // === Vue.js ecosystem ===
                     'v-sr-only',        // Vuetify
                     'p-sr-only',        // PrimeVue
                     'q-sr-only',        // Quasar
-                    
+
                     // === Angular ecosystem ===
                     'cdk-visually-hidden',  // Angular CDK
                     'mat-visually-hidden',  // Angular Material
-                    
+
                     // === Other frameworks ===
                     'ion-sr-only',      // Ionic
                     'is-sr-only',       // Bulma
                     'u-sr-only',        // Utility classes
-                    
+
                     // === Accessibility patterns ===
                     'a11y-hidden',      // a11y = accessibility
                     'a11y-invisible',
@@ -200,40 +200,40 @@ export class OptimizedSnapshotExtractor {
                     'accessibility-text',
                     'assistive-text',
                     'assistive-hidden',
-                    
+
                     // === Hide patterns ===
                     'hide-visually',
                     'hide-text',
                     'text-hide',
                     'hidden-text',
-                    
+
                     // === Reader patterns ===
                     'reader-text',      // WordPress: screen-reader-text
                     'reader-only',
-                    
+
                     // === Offscreen patterns ===
                     'offscreen',
                     'off-screen',
                     'off-canvas-sr',
-                    
+
                     // === Clip patterns ===
                     'clip-hide',
                     'clipped',
                     'clip-rect',
-                    
+
                     // === Foundation framework ===
                     'show-for-sr',
-                    
+
                     // === Navigation/Skip patterns ===
                     'skip-link',        // Skip navigation links
                     'skiplink',
                     'skip-to-',
                     'skipto',
-                    
+
                     // === MUI (Material UI) specific ===
                     '-sronly',          // MuiTypography-srOnly (suffix match)
                     'notranslate',      // Google Translate hidden elements
-                    
+
                     // === Hidden labels/fields ===
                     'hiddenlabel',      // hiddenLabels, hidden-label, etc.
                     'hidden-label',
@@ -241,30 +241,30 @@ export class OptimizedSnapshotExtractor {
                     'field-hidden',
                     'input-hidden'
                 ];
-                
+
                 for (const pattern of srOnlyPatterns) {
                     if (classLower.includes(pattern)) return true;
                 }
-                
+
                 // Verificar aria-hidden
                 if (el.getAttribute('aria-hidden') === 'true') return true;
-                
+
                 // Verificar estilos CSS que hacen el elemento invisible pero accesible
                 const style = getComputedStyle(el);
-                
+
                 // clip: rect(0,0,0,0) o clip-path: inset(50%) - técnicas de ocultación para SR
-                if (style.clip === 'rect(0px, 0px, 0px, 0px)' || 
+                if (style.clip === 'rect(0px, 0px, 0px, 0px)' ||
                     style.clipPath === 'inset(50%)' ||
                     style.clipPath === 'inset(100%)') return true;
-                
+
                 // Elementos con tamaño 1x1 o 0x0 (técnica común de ocultación)
                 const rect = el.getBoundingClientRect();
                 if (rect.width <= 1 && rect.height <= 1) return true;
-                
+
                 // Posición absoluta fuera de la pantalla
                 if ((style.position === 'absolute' || style.position === 'fixed') &&
                     (parseInt(style.left) < -9000 || parseInt(style.top) < -9000)) return true;
-                
+
                 return false;
             };
 
@@ -374,10 +374,10 @@ export class OptimizedSnapshotExtractor {
                             } else if (elClass && typeof (elClass as any).baseVal === 'string') {
                                 elClassStr = (elClass as any).baseVal.toLowerCase();
                             }
-                            
+
                             // Lista rápida de patrones a excluir
-                            const skipPatterns = ['screen-only', 'sr-only', 'visually-hidden', 'screenreader', 
-                                                  'reader-text', 'offscreen', 'clip-hide', 'a11y-hidden'];
+                            const skipPatterns = ['screen-only', 'sr-only', 'visually-hidden', 'screenreader',
+                                'reader-text', 'offscreen', 'clip-hide', 'a11y-hidden'];
                             let shouldSkip = false;
                             for (const pattern of skipPatterns) {
                                 if (elClassStr.includes(pattern)) {
@@ -385,12 +385,12 @@ export class OptimizedSnapshotExtractor {
                                     break;
                                 }
                             }
-                            
+
                             // También verificar aria-hidden
                             if (el.getAttribute('aria-hidden') === 'true') shouldSkip = true;
-                            
+
                             if (shouldSkip) continue;
-                            
+
                             seenElements.add(el);
                             allInteractive.push(el);
                         }
@@ -405,7 +405,7 @@ export class OptimizedSnapshotExtractor {
             for (let i = 0; i < allInteractive.length; i++) {
                 const el = allInteractive[i];
                 if (!isVisible(el)) continue;
-                
+
                 // Filtrar elementos de solo accesibilidad (screen-only, sr-only, etc.)
                 if (isAccessibilityOnly(el)) continue;
 
@@ -614,7 +614,7 @@ export class OptimizedSnapshotExtractor {
                     'button[aria-label="close"], button[title="close"], ' +
                     '[data-test="icClose"], [data-testid="icClose"]'
                 );
-                
+
                 if (closeButton instanceof HTMLElement && isVisible(closeButton)) {
                     // Buscar el contenedor padre más cercano que tenga el panel de búsqueda
                     let container = closeButton.parentElement;
@@ -642,16 +642,16 @@ export class OptimizedSnapshotExtractor {
                                 break;
                             }
                         }
-                        
+
                         if (hasSearchInput || hasPickers) {
                             pageState.hasModal = true;
                             const titleEl = container.querySelector('h1, h2, h3, h4');
                             const title = titleEl?.textContent?.trim() || 'Panel de Búsqueda/Reserva';
-                            
+
                             const actionButtons: string[] = [];
                             if (hasGoButton) actionButtons.push('¡Vamos!');
                             actionButtons.push('cerrar');
-                            
+
                             pageState.modalInfo = {
                                 title: title.slice(0, 50),
                                 buttons: actionButtons
@@ -661,7 +661,7 @@ export class OptimizedSnapshotExtractor {
                         container = container.parentElement;
                     }
                 }
-                
+
                 // Método 2: Buscar directamente por data-test del contenedor de búsqueda
                 if (!pageState.hasModal) {
                     const searchPanel = document.querySelector(
@@ -676,7 +676,7 @@ export class OptimizedSnapshotExtractor {
                         };
                     }
                 }
-                
+
                 // Método 3: Detectar autocomplete dropdown abierto
                 if (!pageState.hasModal) {
                     const autocompleteDropdown = document.querySelector(
@@ -811,7 +811,7 @@ export class OptimizedSnapshotExtractor {
                         }
                     }
                 }
-            } catch (_) {}
+            } catch (_) { }
 
             return {
                 url: window.location.href,

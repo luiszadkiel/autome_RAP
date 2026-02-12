@@ -75,6 +75,8 @@ export class WebAgent {
         screenshotOnEachStep?: boolean;
         /** Directorio para sesiones guardadas (cookies/storage). Por defecto data/sessions */
         sessionsDir?: string;
+        /** Optimizar para ejecución paralela (reduce snapshots, memoria) */
+        optimizeForParallel?: boolean;
     };
 
     constructor(config: {
@@ -87,6 +89,7 @@ export class WebAgent {
         useMiniForSimpleSteps?: boolean;
         screenshotOnEachStep?: boolean;
         sessionsDir?: string;
+        optimizeForParallel?: boolean;
     }) {
         this.config = config;
         this.snapshotExtractor = new OptimizedSnapshotExtractor();
@@ -225,12 +228,12 @@ export class WebAgent {
             this.siteAdapter = AdapterFactory.getAdapter(config.url);
             console.log(`🔌 Usando adaptador: ${this.siteAdapter.name}`);
 
-            // 4. Esperar a que la página tenga contenido real (Warm-up)
+            // 4. Esperar a que la página tenga contenido real (Warm-up); más paciencia para SPAs lentas
             console.log('⏳ Esperando a que la página renderice contenido...');
             let warmedUp = false;
-            for (let i = 0; i < 15; i++) {
+            const warmupMaxAttempts = 20;
+            for (let i = 0; i < warmupMaxAttempts; i++) {
                 try {
-                    // Esperar a que la navegación se estabilice
                     await this.page.waitForLoadState('domcontentloaded').catch(() => { });
 
                     const warmupSnapshot = await this.snapshotExtractor.extract(this.page);
@@ -239,12 +242,14 @@ export class WebAgent {
                         warmedUp = true;
                         break;
                     }
-                    if (i === 5 || i === 10) {
+                    if (i === 5 || i === 10 || i === 15) {
                         console.log('   ...scroll para despertar contenido...');
                         await this.page.evaluate(() => window.scrollBy(0, 300)).catch(() => { });
                     }
+                    // SPAs lentas (pgaoceans4, Outlook Bookings): esperar más entre intentos
+                    const waitMs = i < 8 ? 2000 : 3500;
+                    await waitForPageReady(this.page, { timeout: waitMs });
                 } catch (e: any) {
-                    // Si el contexto fue destruido por navegación, esperar y reintentar
                     if (e.message?.includes('context was destroyed') || e.message?.includes('navigation')) {
                         console.log('   ...página navegando, esperando estabilización...');
                         await waitForPageReady(this.page, { timeout: 5000 });
@@ -252,7 +257,6 @@ export class WebAgent {
                     }
                     throw e;
                 }
-                await waitForPageReady(this.page, { timeout: 2000 });
             }
 
             if (!warmedUp) {
@@ -501,6 +505,13 @@ export class WebAgent {
 
         } finally {
             await this.cleanup();
+            // Limpieza adicional para modo paralelo
+            if (this.config.optimizeForParallel) {
+                // Forzar garbage collection si está disponible
+                if (global.gc) {
+                    global.gc();
+                }
+            }
         }
     }
 
@@ -591,11 +602,22 @@ export class WebAgent {
             }
             this.sessionPathForSave = null;
         }
+        
+        // Cerrar página siempre para liberar memoria (especialmente importante en modo paralelo)
+        if (this.page) {
+            await this.page.close().catch(() => { });
+            this.page = null;
+        }
+        
         if (this.browser) {
             await this.browser.close();
-        } else if (this.page && !this.context) {
-            await this.page.close().catch(() => { });
+            this.browser = null;
         }
-        // Si tenemos context compartido (ejecución paralela), no cerramos página ni context
+        
+        // Limpiar referencias para ayudar al GC
+        if (this.config.optimizeForParallel) {
+            this.capturedApiData = [];
+            this.context = null;
+        }
     }
 }

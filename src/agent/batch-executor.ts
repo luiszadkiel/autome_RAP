@@ -156,9 +156,14 @@ export class BatchActionExecutor {
         credentials?: { email?: string; password?: string }
     ): Promise<void> {
 
+        // Acciones que no requieren elemento: saltar resolución si ref es inválido
+        const actionsWithoutElement = ['wait', 'scroll', 'done', 'back'];
+        const skipElementResolution = actionsWithoutElement.includes(action.action) && 
+                                     (action.ref === 'page' || !snapshot.elements.find(e => e.ref === action.ref));
+
         // Resolver elemento si aplica
         let locator;
-        if (action.ref) {
+        if (action.ref && !skipElementResolution) {
             let element = snapshot.elements.find(e => e.ref === action.ref);
 
             // Si el elemento no existe en el snapshot, intentar recuperación
@@ -210,31 +215,69 @@ export class BatchActionExecutor {
                         await page.keyboard.press('Escape');
                         await page.waitForTimeout(300);
 
-                        // Estrategia 2: Buscar y clickear botón de cerrar si existe
-                        const closeSelectors = [
-                            'button[aria-label="cerrar"]',
-                            'button[aria-label="close"]',
-                            'button[title="cerrar"]',
-                            'button[title="close"]',
-                            '[data-testid="close-button"]',
-                            '.close-button',
-                            '.modal-close'
+                        // Estrategia 2: Buscar y clickear botones de aceptar cookies/GDPR primero
+                        const gdprAcceptSelectors = [
+                            '#consent_prompt_submit',  // Accept All
+                            '#onetrust-accept-btn-handler',
+                            'button:has-text("Accept all")',
+                            'button:has-text("Accept All")',
+                            'div[role="button"]:has-text("Accept All")',
+                            'button:has-text("Aceptar todas")',
+                            'button:has-text("Aceptar")',
                         ];
 
-                        for (const selector of closeSelectors) {
+                        let gdprDismissed = false;
+                        for (const selector of gdprAcceptSelectors) {
                             try {
-                                const closeBtn = page.locator(selector).first();
-                                if (await closeBtn.isVisible({ timeout: 500 })) {
-                                    await closeBtn.click({ timeout: 1000 });
-                                    await page.waitForTimeout(300);
+                                const btn = page.locator(selector).first();
+                                if (await btn.isVisible({ timeout: 500 })) {
+                                    await btn.click({ timeout: 1000 });
+                                    console.log('   🍪 Banner de cookies aceptado');
+                                    await page.waitForTimeout(500);
+                                    gdprDismissed = true;
                                     break;
                                 }
                             } catch { /* continuar con siguiente selector */ }
                         }
 
+                        // Estrategia 3: Buscar y clickear botón de cerrar si existe (solo si no se aceptó GDPR)
+                        if (!gdprDismissed) {
+                            const closeSelectors = [
+                                '.close_btn_thick',  // GDPR close button
+                                'button[aria-label="cerrar"]',
+                                'button[aria-label="close"]',
+                                'button[title="cerrar"]',
+                                'button[title="close"]',
+                                '[data-testid="close-button"]',
+                                '.close-button',
+                                '.modal-close',
+                                '.gdprActive .close_btn_thick',
+                                '.privacy_prompt .close_btn_thick'
+                            ];
+
+                            for (const selector of closeSelectors) {
+                                try {
+                                    const closeBtn = page.locator(selector).first();
+                                    if (await closeBtn.isVisible({ timeout: 500 })) {
+                                        await closeBtn.click({ timeout: 1000 });
+                                        await page.waitForTimeout(300);
+                                        break;
+                                    }
+                                } catch { /* continuar con siguiente selector */ }
+                            }
+                        }
+
                         // Reintentar click obligando force: true (fallback robusto)
                         console.log('   💪 Forzando click (fallback)...');
                         await page.waitForTimeout(500);
+                        await locator.click({ timeout: 5000, force: true, noWaitAfter: true });
+                    } else if (
+                        errorMsg.includes('element is not enabled') ||
+                        errorMsg.includes('not enabled') ||
+                        (errorMsg.includes('Timeout') && (clickError as Error).toString().includes('not enabled'))
+                    ) {
+                        // Elemento deshabilitado (p. ej. día de calendario con aria-disabled) o timeout por no enabled
+                        console.log('   🔄 Elemento deshabilitado o no clickeable, intentando click forzado...');
                         await locator.click({ timeout: 5000, force: true, noWaitAfter: true });
                     } else if (errorMsg.includes('outside of the viewport')) {
                         console.log('   🔄 Elemento fuera del viewport, intentando scroll...');
@@ -382,6 +425,10 @@ export class BatchActionExecutor {
                 break;
 
             case 'wait':
+                // Si el ref es "page" o inválido, simplemente esperar sin buscar elemento
+                if (action.ref === 'page' || skipElementResolution) {
+                    console.log(`   ⏳ Esperando ${action.value ? parseInt(action.value) : 2000}ms...`);
+                }
                 const ms = action.value ? parseInt(action.value) : 2000;
                 await page.waitForTimeout(ms);
                 break;
