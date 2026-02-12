@@ -474,6 +474,45 @@ ${objective}
 `;
       }
     }
+
+    // Detectar loop de navegación de calendario (clicks en flechas de mes)
+    const calendarNavActions = history.filter(a => {
+      const reason = (a.reason || '').toLowerCase();
+      return a.action === 'click' && (
+        reason.includes('mes') || 
+        reason.includes('month') || 
+        reason.includes('calendario') ||
+        reason.includes('calendar') ||
+        reason.includes('siguiente') ||
+        reason.includes('anterior') ||
+        reason.includes('navegar')
+      );
+    });
+    if (calendarNavActions.length >= 3) {
+      prompt += `\n## 🚨 CALENDAR NAVIGATION LOOP DETECTED!
+- Has hecho click en flechas de navegación del calendario ${calendarNavActions.length} veces.
+- La fecha objetivo es "MAÑANA" - el calendario DEBERÍA estar ya en el mes correcto al cargar.
+- ⛔ DETÉN la navegación de meses. Busca el número del día directamente en la vista actual.
+- Si el calendario muestra el mes correcto, busca el día directamente sin navegar más.
+- Si después de 2 intentos más no encuentras el día, reporta "done" con fallo.
+`;
+    }
+
+    // Detectar página no responsiva (solo wait/scroll sin interacción)
+    const recentActions = history.slice(-5);
+    if (recentActions.length >= 5) {
+      const waitAndScrollOnly = recentActions.every(a => 
+        ['wait', 'scroll'].includes(a.action)
+      );
+      if (waitAndScrollOnly) {
+        prompt += `\n## 🚨 PAGE IS NOT RESPONDING!
+- Has hecho solo wait/scroll durante 5+ pasos sin poder interactuar con nada.
+- La página probablemente no puede ser automatizada (requiere JavaScript pesado, cookies, o tiene protección anti-bot).
+- ⛔ Reporta "done" con fallo indicando que la página no responde.
+- NO gastes más pasos intentando wait/scroll.
+`;
+      }
+    }
   }
 
   // Agregar resultado de última acción si falló

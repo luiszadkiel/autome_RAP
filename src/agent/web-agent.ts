@@ -247,7 +247,8 @@ export class WebAgent {
                         await this.page.evaluate(() => window.scrollBy(0, 300)).catch(() => { });
                     }
                     // SPAs lentas (pgaoceans4, Outlook Bookings): esperar más entre intentos
-                    const waitMs = i < 8 ? 2000 : 3500;
+                    // Aumentar progresivamente el timeout para SPAs muy pesadas
+                    const waitMs = i < 8 ? 2000 : (i < 15 ? 3500 : 5000);
                     await waitForPageReady(this.page, { timeout: waitMs });
                 } catch (e: any) {
                     if (e.message?.includes('context was destroyed') || e.message?.includes('navigation')) {

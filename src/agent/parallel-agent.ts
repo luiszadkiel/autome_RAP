@@ -297,10 +297,20 @@ export class ParallelAgent {
         optimizeForManyAgents: boolean = false
     ): Promise<{ result: ParallelTargetResult; context?: BrowserContext }> {
         const startTime = Date.now();
-        const instruction = (target.instruction?.trim() || globalInstruction).trim();
+        
+        // Aislar instrucción para este agente específico
+        let instruction: string;
         if (target.instruction?.trim()) {
+            instruction = target.instruction.trim();
             console.log(`   🤖 Agente #${agentNumber} iniciando: ${target.name} (instrucción propia)`);
         } else {
+            // Filtrar instrucción global para que sea relevante solo a este sitio
+            // Agregar contexto de aislamiento para evitar que el agente intente hacer tareas de otros sitios
+            instruction = `IMPORTANTE: Eres el agente #${agentNumber} asignado SOLO a ${target.name} (${target.url}).
+Otros sitios son manejados por otros agentes. Enfócate SOLO en lo que puedes hacer en ESTE sitio.
+NO intentes navegar a otros sitios ni completar tareas destinadas a otros agentes.
+
+Tarea específica para ${target.name}: ${globalInstruction}`;
             console.log(`   🤖 Agente #${agentNumber} iniciando: ${target.name} (${target.url})`);
         }
 
@@ -334,8 +344,18 @@ export class ParallelAgent {
             });
 
             const duration = Date.now() - startTime;
-            const data = result.data || [];
-            const hasAvailability = data.some((d: { type?: string }) => /availability|disponibilidad|horario/i.test(d.type || ''));
+            const rawData = result.data || [];
+            
+            // Deduplicar extractedInfo antes de agregarlo al resultado
+            const seen = new Set<string>();
+            const dedupedInfo = rawData.filter((info: { type?: string; content?: string }) => {
+                const key = `${info.type || 'unknown'}:${(info.content || '').trim().toLowerCase()}`;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
+            
+            const hasAvailability = dedupedInfo.some((d: { type?: string }) => /availability|disponibilidad|horario/i.test(d.type || ''));
             const instructionLower = instruction.toLowerCase();
             const objectiveWasAvailability = /horario|golf|disponible|mañana|reserva/i.test(instructionLower);
             const isSuccess =
@@ -350,7 +370,7 @@ export class ParallelAgent {
                     target: target.name,
                     url: target.url,
                     status: isSuccess ? 'success' : 'failed',
-                    extractedInfo: result.data || [],
+                    extractedInfo: dedupedInfo,
                     summary: result.extractedSummary || result.summary,
                     duration
                 },
