@@ -312,7 +312,7 @@ const openApiSpec = {
                                         }
                                     },
                                     maxParallel: { type: 'integer', default: 3, minimum: 1, maximum: 10, description: 'Cantidad de agentes ejecutándose simultáneamente' },
-                                    maxStepsPerAgent: { type: 'integer', default: 15, description: 'Máximo de pasos por agente' },
+                                    maxStepsPerAgent: { type: 'integer', default: 20, description: 'Máximo de pasos por agente' },
                                     headless: { type: 'boolean', default: true, description: 'Ejecutar sin mostrar navegadores' }
                                 }
                             },
@@ -324,7 +324,7 @@ const openApiSpec = {
                                     { url: 'https://www.lowes.com', name: 'Lowes', loginUrl: 'https://www.lowes.com/l/login', credentials: { email: 'otro@example.com', password: '***' } }
                                 ],
                                 maxParallel: 3,
-                                maxStepsPerAgent: 15,
+                                maxStepsPerAgent: 20,
                                 headless: true
                             }
                         }
@@ -988,7 +988,7 @@ export function createApiServer(config: {
                 openaiApiKey: openaiKey,
                 maxParallel: body.maxParallel || 3,
                 headless: body.headless ?? true,
-                maxStepsPerAgent: body.maxStepsPerAgent || 15
+                maxStepsPerAgent: body.maxStepsPerAgent || 20
             });
 
             const result = await parallelAgent.run({

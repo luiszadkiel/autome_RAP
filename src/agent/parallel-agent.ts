@@ -469,15 +469,29 @@ export class ParallelAgent {
         }
 
         const byType: Record<string, Array<{ target: string; content: string }>> = {};
+        // Map para deduplicar contenido exacto por tipo
+        const seenContent = new Map<string, Set<string>>(); // tipo -> Set de contenidos ya vistos
+        
         for (const result of resultsWithInfo) {
             for (const info of result.extractedInfo) {
                 if (!byType[info.type]) {
                     byType[info.type] = [];
+                    seenContent.set(info.type, new Set());
                 }
-                byType[info.type].push({
-                    target: result.target,
-                    content: this.decodeUnicodeEscapes(info.content)
-                });
+                
+                const decodedContent = this.decodeUnicodeEscapes(info.content);
+                // Normalizar contenido para comparación (quitar espacios extra, lowercase)
+                const normalizedContent = decodedContent.replace(/\s+/g, ' ').trim().toLowerCase();
+                const contentSet = seenContent.get(info.type)!;
+                
+                // Solo agregar si no hemos visto este contenido exacto antes
+                if (!contentSet.has(normalizedContent)) {
+                    contentSet.add(normalizedContent);
+                    byType[info.type].push({
+                        target: result.target,
+                        content: decodedContent
+                    });
+                }
             }
         }
 

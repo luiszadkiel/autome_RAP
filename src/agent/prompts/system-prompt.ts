@@ -440,6 +440,42 @@ ${objective}
     });
   }
 
+  // Detección de loops problemáticos
+  if (history.length >= 3) {
+    // Detectar loop de wait repetidos
+    const waitActions = history.filter(a => a.action === 'wait');
+    if (waitActions.length >= 3) {
+      prompt += `\n## 🚨 STUCK PATTERN: LOOP DE WAIT DETECTADO
+- Has usado "wait" ${waitActions.length} veces consecutivas!
+- La página puede que nunca termine de cargar completamente.
+- DEBES INTENTAR ALGO DIFERENTE:
+  - Haz scroll hacia abajo para activar carga lazy
+  - Haz click en cualquier elemento visible
+  - Intenta navegar a una URL diferente
+  - Si nada funciona después de 2 intentos más, reporta "done" con fallo
+- ⛔ NO uses "wait" de nuevo!
+`;
+    }
+
+    // Detectar clicks consecutivos al mismo elemento (navegación de calendario)
+    const last4 = history.slice(-4);
+    if (last4.length >= 4) {
+      const allSameClick = last4.every(a => 
+        a.action === 'click' && 
+        a.ref === last4[0].ref && 
+        last4[0].ref !== undefined
+      );
+      if (allSameClick) {
+        prompt += `\n## 🚨 CRITICAL: CLICKS CONSECUTIVOS AL MISMO ELEMENTO
+- Has hecho click en [${last4[0].ref}] 4+ veces seguidas!
+- Esto NO está funcionando. DEBES intentar un enfoque completamente diferente.
+- Si estás navegando un calendario, es posible que ya estés en el mes correcto.
+- Verifica el mes actual antes de seguir navegando.
+`;
+      }
+    }
+  }
+
   // Agregar resultado de última acción si falló
   if (lastResult && !lastResult.success) {
     prompt += `\n## ⚠️ ÚLTIMA ACCIÓN FALLÓ
@@ -465,6 +501,42 @@ ${objective}
 
   if (snapshotRaw.pageState.isLoading) {
     prompt += `⏳ PÁGINA CARGANDO - considera usar "wait"\n\n`;
+  }
+
+  // Advertencia cuando hay pocos elementos (warm-up fallido)
+  const elementCount = snapshotRaw.elements.length;
+  if (elementCount < 5 && history.length === 0) {
+    prompt += `\n## ⚠️ MUY POCOS ELEMENTOS EN LA PÁGINA (${elementCount})
+- La página puede estar cargando aún, o el contenido está en un iframe/overlay.
+- Intenta: hacer scroll hacia abajo, click en cualquier botón visible, o verificar banners de cookies.
+- Si después de 2 intentos no funciona, reporta fallo.
+`;
+  }
+
+  // Reforzar contexto de fecha cuando hay calendario abierto
+  const hasCalendar = snapshotRaw.elements.some(e => 
+    e.name?.toLowerCase().includes('calendario') ||
+    e.role === 'grid' ||
+    (e.name && /^\d{1,2}$/.test(e.name.trim())) ||
+    snapshotFormatted.toLowerCase().includes('calendario')
+  );
+  
+  if (hasCalendar && structuredData.date) {
+    const today = new Date();
+    const tomorrow = new Date(today);
+    tomorrow.setDate(today.getDate() + 1);
+    const MONTHS_ES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 
+                       'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+    const tomorrowNum = tomorrow.getDate();
+    const tomorrowMonth = MONTHS_ES[tomorrow.getMonth()];
+    
+    prompt += `\n## 🚨 CALENDARIO ABIERTO - RECORDATORIO CRÍTICO DE FECHA
+- 🚨 RECUERDA: HOY es ${today.toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' })}
+- 🚨 "MAÑANA" es día ${tomorrowNum} de ${tomorrowMonth}
+- 🚨 El calendario DEBE estar en ${tomorrowMonth} - NO navegues a otro mes!
+- Si el calendario muestra ${tomorrowMonth}, busca el día ${tomorrowNum} directamente.
+- Si estás en otro mes, navega SOLO hasta ${tomorrowMonth}, no más allá.
+`;
   }
 
   // Agregar elementos formateados
