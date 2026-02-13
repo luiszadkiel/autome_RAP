@@ -6,6 +6,19 @@ export interface ExtractedInfo {
     timestamp: number;
 }
 
+export interface ObjectiveCoverage {
+    /** Porcentaje de cobertura del objetivo (0-100) */
+    coverage: number;
+    /** Componentes del objetivo detectados */
+    componentsFound: string[];
+    /** Componentes del objetivo faltantes */
+    componentsMissing: string[];
+    /** Evidencia extraída que respalda el cumplimiento */
+    evidence: string[];
+    /** Confianza en la cobertura (0-100) */
+    confidence: number;
+}
+
 export interface AgentState {
     currentStep: number;
     maxSteps: number;
@@ -17,6 +30,7 @@ export interface AgentState {
     lastSnapshotHash: string;
     objectiveProgress: number; // 0-100
     extractedInfo: ExtractedInfo[]; // Información extraída durante la navegación
+    objectiveCoverage?: ObjectiveCoverage; // Métricas de cobertura del objetivo
 }
 
 export interface ActionRecord {
@@ -55,7 +69,8 @@ export class StateManager {
             recoveryAttempts: 0,
             lastSnapshotHash: '',
             objectiveProgress: 0,
-            extractedInfo: []
+            extractedInfo: [],
+            objectiveCoverage: undefined
         };
     }
 
@@ -92,10 +107,36 @@ export class StateManager {
     }
 
     /**
-     * Verifica si el agente está atascado
+     * Verifica si el agente está atascado basado en snapshot hash (cambios de DOM)
      */
     isStuck(): boolean {
         return this.state.stuckDetectionCounter >= this.STUCK_THRESHOLD;
+    }
+    
+    /**
+     * Verifica si el agente está atascado basado en falta de acciones exitosas
+     * Más robusto para SPAs donde el DOM cambia pero no hay progreso real
+     */
+    isStuckByLackOfProgress(): boolean {
+        if (this.state.currentStep < 5) return false; // Necesitamos al menos 5 pasos para detectar
+        
+        const recentActions = this.state.executedActions.slice(-5);
+        
+        // Si en los últimos 5 pasos no hubo ninguna acción exitosa, está atascado
+        const hasSuccessfulAction = recentActions.some(a => a.success);
+        if (!hasSuccessfulAction) {
+            return true;
+        }
+        
+        // Si solo hay waits y scrolls sin éxito, está atascado
+        const onlyWaitsAndScrolls = recentActions.every(a => 
+            (a.action === 'wait' || a.action === 'scroll') && !a.success
+        );
+        if (onlyWaitsAndScrolls && recentActions.length >= 4) {
+            return true;
+        }
+        
+        return false;
     }
 
     /**
@@ -279,6 +320,104 @@ export class StateManager {
     }
 
     /**
+     * Calcula la cobertura del objetivo basado en la información extraída
+     */
+    calculateObjectiveCoverage(objective: string): ObjectiveCoverage {
+        const objectiveLower = objective.toLowerCase();
+        const extractedInfo = this.state.extractedInfo;
+        const componentsFound: string[] = [];
+        const componentsMissing: string[] = [];
+        const evidence: string[] = [];
+        let coverage = 0;
+        let confidence = 0;
+
+        // Detectar componentes del objetivo
+        const objectiveKeywords = {
+            availability: ['horario', 'disponible', 'availability', 'schedule', 'time', 'slot', 'fecha', 'date'],
+            price: ['precio', 'price', 'costo', 'cost', 'cuánto', 'cuanto', 'rd$', '$', '€', '£'],
+            product: ['producto', 'product', 'artículo', 'item', 'servicio', 'service'],
+            reservation: ['reservar', 'reserve', 'booking', 'reserva', 'solicitar', 'request'],
+            search: ['buscar', 'search', 'encontrar', 'find', 'listar', 'list'],
+            login: ['login', 'loguear', 'iniciar sesión', 'sign in']
+        };
+
+        // Verificar cada componente
+        for (const [component, keywords] of Object.entries(objectiveKeywords)) {
+            const hasKeyword = keywords.some(kw => objectiveLower.includes(kw));
+            if (!hasKeyword) continue;
+
+            const hasInfo = extractedInfo.some(info => {
+                const contentLower = info.content.toLowerCase();
+                const typeLower = info.type.toLowerCase();
+                return keywords.some(kw => contentLower.includes(kw) || typeLower.includes(kw));
+            });
+
+            if (hasInfo) {
+                componentsFound.push(component);
+                const relevantInfo = extractedInfo.filter(info => {
+                    const contentLower = info.content.toLowerCase();
+                    return keywords.some(kw => contentLower.includes(kw));
+                });
+                evidence.push(...relevantInfo.map(i => `${component}: ${i.content}`));
+                coverage += 20; // Cada componente vale 20%
+                confidence += 15;
+            } else {
+                componentsMissing.push(component);
+            }
+        }
+
+        // Cobertura adicional basada en información extraída
+        if (extractedInfo.length > 0) {
+            const hasRelevantInfo = extractedInfo.some(info => {
+                const contentLower = info.content.toLowerCase();
+                return objectiveLower.split(' ').some(word => 
+                    word.length > 3 && contentLower.includes(word.toLowerCase())
+                );
+            });
+            if (hasRelevantInfo) {
+                coverage += 10;
+                confidence += 10;
+            }
+        }
+
+        // Verificar si hay acciones exitosas relacionadas con el objetivo
+        const successfulActions = this.state.executedActions.filter(a => a.success);
+        if (successfulActions.length > 0) {
+            coverage += Math.min(20, successfulActions.length * 5);
+            confidence += Math.min(15, successfulActions.length * 3);
+        }
+
+        // Normalizar valores
+        coverage = Math.min(100, coverage);
+        confidence = Math.min(100, confidence);
+
+        // Si no hay componentes detectados pero hay información extraída, dar cobertura mínima
+        if (componentsFound.length === 0 && extractedInfo.length > 0) {
+            coverage = Math.max(coverage, 30);
+            confidence = Math.max(confidence, 40);
+            evidence.push(...extractedInfo.slice(0, 3).map(i => i.content));
+        }
+
+        const result: ObjectiveCoverage = {
+            coverage,
+            componentsFound,
+            componentsMissing,
+            evidence: evidence.slice(0, 10), // Limitar evidencia a 10 items
+            confidence
+        };
+
+        this.state.objectiveCoverage = result;
+        return result;
+    }
+
+    /**
+     * Obtiene la cobertura del objetivo calculada
+     */
+    getObjectiveCoverage(): ObjectiveCoverage | undefined {
+        return this.state.objectiveCoverage;
+    }
+
+    /**
      * Genera un resumen final de toda la información extraída
      */
     generateFinalSummary(objective: string, finalStatus: string): string {
@@ -286,11 +425,22 @@ export class StateManager {
         const actions = this.state.executedActions;
         const visitedUrls = Array.from(this.state.visitedUrls);
 
+        // Calcular cobertura del objetivo
+        const coverage = this.calculateObjectiveCoverage(objective);
+
         let summary = `\n📋 RESUMEN DE INFORMACIÓN EXTRAÍDA\n`;
         summary += `${'='.repeat(50)}\n`;
         summary += `🎯 Objetivo: ${objective}\n`;
         summary += `📊 Estado final: ${finalStatus}\n`;
-        summary += `📍 Pasos ejecutados: ${this.state.currentStep}\n\n`;
+        summary += `📍 Pasos ejecutados: ${this.state.currentStep}\n`;
+        summary += `📈 Cobertura del objetivo: ${coverage.coverage}% (confianza: ${coverage.confidence}%)\n`;
+        if (coverage.componentsFound.length > 0) {
+            summary += `   ✓ Componentes encontrados: ${coverage.componentsFound.join(', ')}\n`;
+        }
+        if (coverage.componentsMissing.length > 0) {
+            summary += `   ✗ Componentes faltantes: ${coverage.componentsMissing.join(', ')}\n`;
+        }
+        summary += `\n`;
 
         // URLs visitadas
         if (visitedUrls.length > 0) {

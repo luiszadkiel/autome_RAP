@@ -51,6 +51,13 @@ export class LoginVerifier {
             confidence -= 40;
             evidence.push(`Errores detectados: ${errorMessages.join(', ')}`);
         }
+        
+        // Detectar 2FA / OTP / Captcha
+        const twoFactorDetected = await this.detectTwoFactorOrCaptcha(page);
+        if (twoFactorDetected.found) {
+            confidence = 0; // Login no completado si requiere 2FA
+            evidence.push(`⚠️ ${twoFactorDetected.type} detectado: ${twoFactorDetected.details}`);
+        }
 
         const cookies = await page.context().cookies();
         const sessionCookies = cookies.filter(c =>
@@ -136,5 +143,86 @@ export class LoginVerifier {
             }
         } catch { /* ignorar */ }
         return errors;
+    }
+    
+    /**
+     * Detecta si la página requiere 2FA, OTP o tiene un captcha
+     */
+    private async detectTwoFactorOrCaptcha(page: Page): Promise<{ found: boolean; type: string; details: string }> {
+        // Detectar campos de 2FA/OTP
+        const twoFactorSelectors = [
+            'input[name*="otp"]',
+            'input[name*="code"]',
+            'input[name*="verification"]',
+            'input[name*="2fa"]',
+            'input[name*="two-factor"]',
+            'input[type="tel"][maxlength="6"]', // Códigos OTP suelen ser 6 dígitos
+            'input[placeholder*="code" i]',
+            'input[placeholder*="otp" i]',
+            'input[placeholder*="verification" i]',
+            '[id*="otp"]',
+            '[id*="verification-code"]',
+            '[class*="otp"]',
+            '[class*="verification-code"]'
+        ];
+        
+        for (const selector of twoFactorSelectors) {
+            try {
+                const visible = await page.locator(selector).isVisible({ timeout: 1000 });
+                if (visible) {
+                    const label = await page.locator(selector).getAttribute('placeholder') || 
+                                 await page.locator(selector).getAttribute('name') || 
+                                 'campo de verificación';
+                    return { found: true, type: '2FA/OTP', details: `Campo de verificación detectado: ${label}` };
+                }
+            } catch { /* continuar */ }
+        }
+        
+        // Detectar texto relacionado con 2FA
+        try {
+            const bodyText = await page.textContent('body') || '';
+            const twoFactorPatterns = [
+                /verification code|verification code sent|enter.*code|two.?factor|2.?factor|otp|authentication code/i,
+                /código de verificación|código enviado|ingresa.*código|autenticación.*factor/i
+            ];
+            
+            for (const pattern of twoFactorPatterns) {
+                if (pattern.test(bodyText)) {
+                    return { found: true, type: '2FA/OTP', details: 'Texto de 2FA detectado en página' };
+                }
+            }
+        } catch { /* ignorar */ }
+        
+        // Detectar captcha (reCAPTCHA, hCaptcha, etc.)
+        const captchaSelectors = [
+            '[class*="recaptcha"]',
+            '[id*="recaptcha"]',
+            '[class*="hcaptcha"]',
+            '[id*="hcaptcha"]',
+            'iframe[src*="recaptcha"]',
+            'iframe[src*="hcaptcha"]',
+            '.g-recaptcha',
+            '#g-recaptcha',
+            '[data-sitekey]' // reCAPTCHA usa data-sitekey
+        ];
+        
+        for (const selector of captchaSelectors) {
+            try {
+                const count = await page.locator(selector).count();
+                if (count > 0) {
+                    return { found: true, type: 'Captcha', details: `Captcha detectado (${selector})` };
+                }
+            } catch { /* continuar */ }
+        }
+        
+        // Detectar texto relacionado con captcha
+        try {
+            const bodyText = await page.textContent('body') || '';
+            if (/captcha|i'm not a robot|no soy un robot/i.test(bodyText)) {
+                return { found: true, type: 'Captcha', details: 'Texto de captcha detectado en página' };
+            }
+        } catch { /* ignorar */ }
+        
+        return { found: false, type: '', details: '' };
     }
 }

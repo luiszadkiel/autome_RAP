@@ -39,6 +39,14 @@ interface AgentResult {
     duration: number;
     finalUrl: string;
     error?: string;
+    /** Métricas de cobertura del objetivo */
+    objectiveCoverage?: {
+        coverage: number;
+        componentsFound: string[];
+        componentsMissing: string[];
+        evidence: string[];
+        confidence: number;
+    };
     // Compatibility fields for index.ts
     steps: any[];
     data?: any;
@@ -61,9 +69,30 @@ export class WebAgent {
     private loginVerifier: LoginVerifier;
     /** Respuestas API/XHR capturadas para contexto del LLM (precios, disponibilidad, etc.) */
     private capturedApiData: { url: string; data: unknown }[] = [];
+    
+    /**
+     * Limpia capturedApiData para evitar memory leaks
+     * Se llama automáticamente cuando se alcanza el límite
+     */
+    private cleanupCapturedApiData(): void {
+        if (this.capturedApiData.length > WebAgent.MAX_CAPTURED_API) {
+            // Mantener solo los más recientes
+            this.capturedApiData = this.capturedApiData.slice(-WebAgent.MAX_CAPTURED_API);
+        }
+    }
     /** Ruta donde guardar storageState al finalizar (persistencia de sesión por dominio) */
     private sessionPathForSave: string | null = null;
     private static readonly MAX_CAPTURED_API = 25;
+    /** AbortController para cancelación limpia del agente */
+    private abortController: AbortController | null = null;
+    /** Último timestamp de progreso real (acción exitosa o cambio de paso) */
+    private lastProgressTimestamp: number = Date.now();
+    /** Último paso registrado para detectar progreso */
+    private lastStepCount: number = 0;
+    /** Health check del browser - último timestamp de verificación */
+    private lastBrowserHealthCheck: number = Date.now();
+    /** Intervalo de health check del browser */
+    private browserHealthCheckInterval: NodeJS.Timeout | null = null;
     private config: {
         openaiApiKey: string;
         headless?: boolean;
@@ -105,6 +134,105 @@ export class WebAgent {
         this.loginVerifier = new LoginVerifier();
     }
 
+    /**
+     * Verifica si el agente está haciendo progreso real (heartbeat)
+     * Retorna true si hubo progreso en los últimos X segundos
+     */
+    hasRecentProgress(maxIdleSeconds: number = 30): boolean {
+        const idleTime = Date.now() - this.lastProgressTimestamp;
+        return idleTime < maxIdleSeconds * 1000;
+    }
+
+    /**
+     * Obtiene el último timestamp de progreso
+     */
+    getLastProgressTimestamp(): number {
+        return this.lastProgressTimestamp;
+    }
+
+    /**
+     * Cancela la ejecución del agente de forma limpia
+     */
+    cancel(): void {
+        if (this.abortController) {
+            this.abortController.abort();
+        }
+    }
+
+    /**
+     * Verifica si el agente fue cancelado
+     */
+    isCancelled(): boolean {
+        return this.abortController?.signal.aborted ?? false;
+    }
+
+    /**
+     * Verifica la salud del browser/contexto
+     */
+    private async checkBrowserHealth(): Promise<boolean> {
+        try {
+            if (!this.page || !this.context) return false;
+            
+            // Verificar que la página no esté cerrada
+            if (this.page.isClosed()) {
+                console.warn('⚠️ Browser health check: página cerrada');
+                return false;
+            }
+            
+            // Verificar que el contexto no esté cerrado
+            const pages = this.context.pages();
+            if (pages.length === 0 && this.page.isClosed()) {
+                console.warn('⚠️ Browser health check: contexto sin páginas');
+                return false;
+            }
+            
+            // Intentar una operación simple para verificar que el browser responde
+            try {
+                await this.page.evaluate(() => document.readyState);
+            } catch (e: any) {
+                if (e.message?.includes('Target closed') || 
+                    e.message?.includes('Browser closed') ||
+                    e.message?.includes('context was destroyed')) {
+                    console.warn('⚠️ Browser health check: browser no responde');
+                    return false;
+                }
+            }
+            
+            return true;
+        } catch (error) {
+            console.warn('⚠️ Browser health check falló:', (error as Error).message);
+            return false;
+        }
+    }
+
+    /**
+     * Inicia health checks periódicos del browser
+     */
+    private startBrowserHealthChecks(): void {
+        if (this.browserHealthCheckInterval) return; // Ya está corriendo
+        
+        const HEALTH_CHECK_INTERVAL = 30_000; // Cada 30 segundos
+        
+        this.browserHealthCheckInterval = setInterval(async () => {
+            const isHealthy = await this.checkBrowserHealth();
+            if (!isHealthy) {
+                console.error('❌ Browser health check falló. El browser puede estar crasheado.');
+                // No cancelamos automáticamente, pero logueamos el problema
+            }
+            this.lastBrowserHealthCheck = Date.now();
+        }, HEALTH_CHECK_INTERVAL);
+    }
+
+    /**
+     * Detiene los health checks del browser
+     */
+    private stopBrowserHealthChecks(): void {
+        if (this.browserHealthCheckInterval) {
+            clearInterval(this.browserHealthCheckInterval);
+            this.browserHealthCheckInterval = null;
+        }
+    }
+
     async run(params: {
         url: string;
         instruction: string;
@@ -115,6 +243,12 @@ export class WebAgent {
         context?: BrowserContext;
     }): Promise<AgentResult> {
         const startTime = Date.now();
+        this.abortController = new AbortController();
+        this.lastProgressTimestamp = Date.now();
+        this.lastStepCount = 0;
+        
+        // Iniciar health checks del browser
+        this.startBrowserHealthChecks();
 
         // Configurar structured data
         const now = new Date();
@@ -180,9 +314,13 @@ export class WebAgent {
                 try {
                     const data = await response.json().catch(() => null);
                     if (data) {
-                        this.capturedApiData.push({ url, data });
-                        if (this.capturedApiData.length > WebAgent.MAX_CAPTURED_API) {
-                            this.capturedApiData.shift();
+                        // Limitar tamaño de datos capturados para evitar memory leaks
+                        const dataSize = JSON.stringify(data).length;
+                        const MAX_DATA_SIZE = 50_000; // 50KB por respuesta
+                        
+                        if (dataSize <= MAX_DATA_SIZE) {
+                            this.capturedApiData.push({ url, data });
+                            this.cleanupCapturedApiData();
                         }
                     }
                 } catch (_) { }
@@ -231,10 +369,37 @@ export class WebAgent {
             // 4. Esperar a que la página tenga contenido real (Warm-up); más paciencia para SPAs lentas
             console.log('⏳ Esperando a que la página renderice contenido...');
             let warmedUp = false;
-            const warmupMaxAttempts = 20;
+            const warmupMaxAttempts = 25; // Aumentado para SPAs muy pesadas
+            const hostnameLower = hostname.toLowerCase();
+            const isKnownSlowSPA = /pgaoceans4|outlook|bookings|microsoft/i.test(hostnameLower);
+            
             for (let i = 0; i < warmupMaxAttempts; i++) {
                 try {
                     await this.page.waitForLoadState('domcontentloaded').catch(() => { });
+
+                    // Intentar aceptar cookies/banners automáticamente en sitios conocidos
+                    if (i === 2 && isKnownSlowSPA) {
+                        try {
+                            const cookieSelectors = [
+                                'button:has-text("Accept")',
+                                'button:has-text("Aceptar")',
+                                'button:has-text("I agree")',
+                                'button:has-text("Acepto")',
+                                '[id*="cookie"] button',
+                                '[class*="cookie"] button',
+                                '[data-testid*="cookie"] button'
+                            ];
+                            for (const selector of cookieSelectors) {
+                                const btn = await this.page.locator(selector).first().isVisible({ timeout: 2000 }).catch(() => false);
+                                if (btn) {
+                                    await this.page.locator(selector).first().click({ timeout: 2000 }).catch(() => { });
+                                    console.log('   🍪 Banner de cookies aceptado automáticamente');
+                                    await waitForPageReady(this.page, { timeout: 3000 });
+                                    break;
+                                }
+                            }
+                        } catch (_) { /* Ignorar errores de cookie banner */ }
+                    }
 
                     const warmupSnapshot = await this.snapshotExtractor.extract(this.page);
                     if (warmupSnapshot.elements.length > 10) {
@@ -242,13 +407,15 @@ export class WebAgent {
                         warmedUp = true;
                         break;
                     }
-                    if (i === 5 || i === 10 || i === 15) {
+                    if (i === 5 || i === 10 || i === 15 || i === 20) {
                         console.log('   ...scroll para despertar contenido...');
                         await this.page.evaluate(() => window.scrollBy(0, 300)).catch(() => { });
                     }
                     // SPAs lentas (pgaoceans4, Outlook Bookings): esperar más entre intentos
                     // Aumentar progresivamente el timeout para SPAs muy pesadas
-                    const waitMs = i < 8 ? 2000 : (i < 15 ? 3500 : 5000);
+                    const waitMs = isKnownSlowSPA 
+                        ? (i < 8 ? 3000 : (i < 15 ? 5000 : (i < 20 ? 7000 : 10000)))
+                        : (i < 8 ? 2000 : (i < 15 ? 3500 : 5000));
                     await waitForPageReady(this.page, { timeout: waitMs });
                 } catch (e: any) {
                     if (e.message?.includes('context was destroyed') || e.message?.includes('navigation')) {
@@ -352,14 +519,39 @@ export class WebAgent {
                     }
                 }
 
-                // Tomar snapshot
+                // Tomar snapshot (con manejo de contexto cerrado)
                 console.log(`\n📍 Paso ${this.stateManager.getState().currentStep + 1}`);
-                let snapshot = await this.snapshotExtractor.extract(this.page);
+                let snapshot: OptimizedSnapshot;
+                try {
+                    snapshot = await this.snapshotExtractor.extract(this.page);
+                } catch (snapshotError: any) {
+                    const errorMessage = snapshotError.message || '';
+                    if (errorMessage.includes('Target page, context or browser has been closed') ||
+                        errorMessage.includes('Target closed') ||
+                        errorMessage.includes('Browser closed') ||
+                        errorMessage.includes('context was destroyed')) {
+                        console.log('⚠️ Contexto cerrado durante snapshot. Terminando agente.');
+                        return this.createResult('context_closed', startTime, config.objective, snapshotError as Error);
+                    }
+                    throw snapshotError;
+                }
 
                 if (snapshot.elements.length === 0) {
                     console.log('   ⚠️ Snapshot vacío, esperando que la página cargue...');
-                    await waitForPageReady(this.page!, { timeout: 5000 });
-                    snapshot = await this.snapshotExtractor.extract(this.page);
+                    try {
+                        await waitForPageReady(this.page!, { timeout: 5000 });
+                        snapshot = await this.snapshotExtractor.extract(this.page);
+                    } catch (waitError: any) {
+                        const errorMessage = waitError.message || '';
+                        if (errorMessage.includes('Target page, context or browser has been closed') ||
+                            errorMessage.includes('Target closed') ||
+                            errorMessage.includes('Browser closed') ||
+                            errorMessage.includes('context was destroyed')) {
+                            console.log('⚠️ Contexto cerrado durante wait. Terminando agente.');
+                            return this.createResult('context_closed', startTime, config.objective, waitError as Error);
+                        }
+                        throw waitError;
+                    }
                 }
 
                 console.log(`   📸 ${snapshot.meta.elementCount} elementos (${snapshot.meta.extractionTimeMs}ms)`);
@@ -374,11 +566,31 @@ export class WebAgent {
                     }
                 }
 
-                // Detectar si estamos atascados
-                if (this.stateManager.isStuck()) {
+                // Detectar ciclo wait/scroll (agente atascado sin progreso)
+                const actionHistory = this.stateManager.getActionHistory();
+                if (actionHistory.length >= 4) {
+                    const lastActions = actionHistory.slice(-4);
+                    const allWaitsOrScrolls = lastActions.every(a => 
+                        a.action === 'wait' || 
+                        a.action === 'scroll' ||
+                        (a.action === 'click' && a.reason?.toLowerCase().includes('scroll'))
+                    );
+                    if (allWaitsOrScrolls && loginCompleted) {
+                        console.log('⚠️ Agente atascado en ciclo wait/scroll. Terminando para evitar timeout.');
+                        return this.createResult('stuck_in_wait_cycle', startTime, config.objective);
+                    }
+                }
+
+                // Detectar si estamos atascados (dos métodos: por snapshot hash y por falta de progreso)
+                const stuckByHash = this.stateManager.isStuck();
+                const stuckByProgress = this.stateManager.isStuckByLackOfProgress();
+                
+                if (stuckByHash || stuckByProgress) {
+                    const stuckReason = stuckByHash ? 'snapshot hash no cambia' : 'sin acciones exitosas recientes';
+                    console.log(`⚠️ Detectado estado atascado (${stuckReason}), aplicando recuperación...`);
+                    
                     const shouldContinueRecovery = this.stateManager.recordRecoveryAttempt();
                     if (shouldContinueRecovery) {
-                        console.log('⚠️ Detectado estado atascado, aplicando recuperación...');
                         await this.applyRecoveryStrategies();
                         continue;
                     }
@@ -429,6 +641,19 @@ export class WebAgent {
                             source: this.page!.url()
                         });
                         console.log(`   📝 Info extraída [${info.type}]: ${info.content}`);
+                    }
+                }
+
+                // Early exit: Si hay errores repetidos (ej: "No hay fechas disponibles" varias veces)
+                if (loginCompleted) {
+                    const extractedInfo = this.stateManager.getExtractedInfo();
+                    const errorInfoCount = extractedInfo.filter(i => 
+                        i.type === 'error' || 
+                        /no hay|no disponible|not available|sin.*disponible/i.test(i.content)
+                    ).length;
+                    if (errorInfoCount >= 2) {
+                        console.log('⚠️ Información de error repetida detectada. Terminando temprano para evitar timeout.');
+                        return this.createResult('error_repeated', startTime, config.objective);
                     }
                 }
 
@@ -499,14 +724,29 @@ export class WebAgent {
                     continue;
                 }
 
-                const batchResult = await this.batchExecutor.executeBatch(
-                    this.page,
-                    decision,
-                    snapshot,
-                    this.siteAdapter,
-                    this.context!,
-                    structuredData.credentials
-                );
+                let batchResult: BatchExecutionResult;
+                try {
+                    batchResult = await this.batchExecutor.executeBatch(
+                        this.page,
+                        decision,
+                        snapshot,
+                        this.siteAdapter,
+                        this.context!,
+                        structuredData.credentials
+                    );
+                } catch (batchError: any) {
+                    // Detectar si el contexto fue cerrado (timeout de otro agente o cierre en cascada)
+                    const errorMessage = batchError.message || '';
+                    if (errorMessage.includes('Target page, context or browser has been closed') ||
+                        errorMessage.includes('Target closed') ||
+                        errorMessage.includes('Browser closed') ||
+                        errorMessage.includes('context was destroyed')) {
+                        console.log('⚠️ Contexto cerrado durante ejecución. Terminando agente.');
+                        return this.createResult('context_closed', startTime, config.objective, batchError as Error);
+                    }
+                    // Re-lanzar otros errores
+                    throw batchError;
+                }
 
                 // Si se abrió una nueva pestaña, actualizar la referencia
                 if (batchResult.newPage) {
@@ -515,6 +755,7 @@ export class WebAgent {
                 }
 
                 // Registrar resultados en StateManager
+                const currentStepBefore = this.stateManager.getState().currentStep;
                 for (const res of batchResult.results) {
                     this.stateManager.recordAction({
                         step: this.stateManager.getState().currentStep,
@@ -526,6 +767,22 @@ export class WebAgent {
                         reason: res.action.why,
                         snapshotHash: this.snapshotExtractor.getSnapshotHash(snapshot)
                     });
+                }
+                
+                // Actualizar heartbeat si hubo progreso real (acción exitosa o cambio de paso)
+                const currentStepAfter = this.stateManager.getState().currentStep;
+                const hasSuccessfulAction = batchResult.results.some(r => r.success);
+                const stepChanged = currentStepAfter > currentStepBefore;
+                
+                if (hasSuccessfulAction || stepChanged) {
+                    this.lastProgressTimestamp = Date.now();
+                    this.lastStepCount = currentStepAfter;
+                }
+                
+                // Verificar cancelación después de cada batch
+                if (this.isCancelled()) {
+                    console.log('⚠️ Agente cancelado. Terminando ejecución.');
+                    return this.createResult('cancelled', startTime, config.objective);
                 }
 
                 // Detectar bucle detalle → back → click producto sin extraer precios
@@ -628,9 +885,23 @@ export class WebAgent {
         const duration = Date.now() - startTime;
         const steps = this.stateManager.getState().currentStep;
 
+        // Calcular cobertura del objetivo
+        const objectiveCoverage = this.stateManager.calculateObjectiveCoverage(objective);
+
         // Generar resumen de información extraída
         const extractedSummary = this.stateManager.generateFinalSummary(objective, status);
         console.log(extractedSummary);
+
+        // Log de cobertura
+        if (objectiveCoverage.coverage > 0) {
+            console.log(`\n📊 Cobertura del objetivo: ${objectiveCoverage.coverage}% (confianza: ${objectiveCoverage.confidence}%)`);
+            if (objectiveCoverage.componentsFound.length > 0) {
+                console.log(`   ✓ Componentes encontrados: ${objectiveCoverage.componentsFound.join(', ')}`);
+            }
+            if (objectiveCoverage.componentsMissing.length > 0) {
+                console.log(`   ✗ Componentes faltantes: ${objectiveCoverage.componentsMissing.join(', ')}`);
+            }
+        }
 
         return {
             status,
@@ -641,6 +912,13 @@ export class WebAgent {
             duration: duration,
             finalUrl: this.page?.url() || '',
             error: error?.message,
+            objectiveCoverage: {
+                coverage: objectiveCoverage.coverage,
+                componentsFound: objectiveCoverage.componentsFound,
+                componentsMissing: objectiveCoverage.componentsMissing,
+                evidence: objectiveCoverage.evidence,
+                confidence: objectiveCoverage.confidence
+            },
             // Compatibility fields
             steps: this.stateManager.getState().executedActions,
             data: this.stateManager.getExtractedInfo(),
@@ -650,32 +928,75 @@ export class WebAgent {
     }
 
     private async cleanup(): Promise<void> {
-        if (this.browser && this.context && this.sessionPathForSave) {
+        // Guardar sesión solo si el contexto aún está abierto y es nuestro propio browser
+        if (this.browser && this.context && this.sessionPathForSave && !this.config.optimizeForParallel) {
             try {
-                ensureSessionsDir(this.config.sessionsDir);
-                await this.context.storageState({ path: this.sessionPathForSave });
-                console.log('🔐 Sesión guardada para próxima ejecución');
-            } catch (e) {
-                console.warn('⚠️ No se pudo guardar sesión:', (e as Error).message);
+                // Verificar que el contexto no esté cerrado antes de intentar guardar
+                const pages = this.context.pages();
+                if (pages.length > 0) {
+                    ensureSessionsDir(this.config.sessionsDir);
+                    await this.context.storageState({ path: this.sessionPathForSave });
+                    console.log('🔐 Sesión guardada para próxima ejecución');
+                }
+            } catch (e: any) {
+                const errorMsg = (e as Error).message || '';
+                // Ignorar errores de contexto cerrado (normal en modo paralelo)
+                if (!errorMsg.includes('Target closed') && 
+                    !errorMsg.includes('Browser closed') &&
+                    !errorMsg.includes('context was destroyed') &&
+                    !errorMsg.includes('Target page, context or browser has been closed')) {
+                    console.warn('⚠️ No se pudo guardar sesión:', errorMsg);
+                }
             }
             this.sessionPathForSave = null;
         }
         
         // Cerrar página siempre para liberar memoria (especialmente importante en modo paralelo)
-        if (this.page) {
-            await this.page.close().catch(() => { });
+        // Pero solo si el contexto aún está abierto (en modo paralelo, el contexto se cierra externamente)
+        if (this.page && !this.config.optimizeForParallel) {
+            try {
+                await this.page.close();
+            } catch (e: any) {
+                // Ignorar errores de página ya cerrada
+                const errorMsg = e.message || '';
+                if (!errorMsg.includes('Target closed') && 
+                    !errorMsg.includes('Browser closed') &&
+                    !errorMsg.includes('Target page, context or browser has been closed')) {
+                    console.warn('⚠️ Error al cerrar página:', errorMsg);
+                }
+            }
+            this.page = null;
+        } else if (this.page) {
+            // En modo paralelo, solo limpiar referencia
             this.page = null;
         }
         
-        if (this.browser) {
-            await this.browser.close();
+        // Solo cerrar browser si es nuestro propio browser (no compartido)
+        if (this.browser && !this.config.optimizeForParallel) {
+            try {
+                await this.browser.close();
+            } catch (e: any) {
+                const errorMsg = e.message || '';
+                if (!errorMsg.includes('Target closed') && 
+                    !errorMsg.includes('Browser closed')) {
+                    console.warn('⚠️ Error al cerrar browser:', errorMsg);
+                }
+            }
             this.browser = null;
         }
         
         // Limpiar referencias para ayudar al GC
         if (this.config.optimizeForParallel) {
             this.capturedApiData = [];
+            // No cerrar contexto en modo paralelo - se cierra externamente por runSingleAgent
             this.context = null;
         }
+        
+        // Limpiar siempre capturedApiData para evitar memory leaks
+        this.capturedApiData = [];
+        this.abortController = null;
+        
+        // Detener health checks
+        this.stopBrowserHealthChecks();
     }
 }

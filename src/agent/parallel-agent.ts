@@ -210,8 +210,28 @@ export class ParallelAgent {
             }
         }
 
-        // Cerrar contextos inmediatamente para liberar memoria
-        await Promise.all(contextsToClose.map(ctx => ctx.close().catch(() => { })));
+        // Cerrar contextos inmediatamente para liberar memoria (aislado para evitar errores en cascada)
+        // NOTA: Los contextos ya deberían estar cerrados por runSingleAgent, pero los cerramos aquí
+        // por si acaso para asegurar limpieza completa
+        await Promise.all(contextsToClose.map(async (ctx) => {
+            try {
+                // Verificar si el contexto ya está cerrado antes de intentar cerrarlo
+                const pages = ctx.pages();
+                if (pages.length > 0) {
+                    // Cerrar páginas primero
+                    await Promise.all(pages.map(page => page.close().catch(() => {})));
+                }
+                await ctx.close();
+            } catch (closeError: any) {
+                // Ignorar errores de cierre esperados (contexto ya cerrado por timeout u otro agente)
+                if (!closeError.message?.includes('Target closed') && 
+                    !closeError.message?.includes('Browser closed') &&
+                    !closeError.message?.includes('context was destroyed') &&
+                    !closeError.message?.includes('Target page, context or browser has been closed')) {
+                    console.warn(`   ⚠️ Error al cerrar contexto: ${closeError.message}`);
+                }
+            }
+        }));
     }
 
     private async runChunkWithMultipleBrowsers(
@@ -279,8 +299,28 @@ export class ParallelAgent {
                 }
             }
 
-            // Cerrar contextos inmediatamente para liberar memoria
-            await Promise.all(contextsToClose.map(ctx => ctx.close().catch(() => { })));
+            // Cerrar contextos inmediatamente para liberar memoria (aislado para evitar errores en cascada)
+            // NOTA: Los contextos ya deberían estar cerrados por runSingleAgent, pero los cerramos aquí
+            // por si acaso para asegurar limpieza completa
+            await Promise.all(contextsToClose.map(async (ctx) => {
+                try {
+                    // Verificar si el contexto ya está cerrado antes de intentar cerrarlo
+                    const pages = ctx.pages();
+                    if (pages.length > 0) {
+                        // Cerrar páginas primero
+                        await Promise.all(pages.map(page => page.close().catch(() => {})));
+                    }
+                    await ctx.close();
+                } catch (closeError: any) {
+                    // Ignorar errores de cierre esperados (contexto ya cerrado por timeout u otro agente)
+                    if (!closeError.message?.includes('Target closed') && 
+                        !closeError.message?.includes('Browser closed') &&
+                        !closeError.message?.includes('context was destroyed') &&
+                        !closeError.message?.includes('Target page, context or browser has been closed')) {
+                        console.warn(`   ⚠️ Error al cerrar contexto: ${closeError.message}`);
+                    }
+                }
+            }));
             
             // Pequeña pausa entre grupos para evitar sobrecarga
             if (groupIndex < browserGroups.length - 1) {
@@ -315,6 +355,7 @@ Tarea específica para ${target.name}: ${globalInstruction}`;
         }
 
         let context: BrowserContext | undefined;
+        let contextClosed = false; // Flag para evitar cierre doble
 
         try {
             // Crear contexto con límites de recursos optimizados
@@ -335,8 +376,26 @@ Tarea específica para ${target.name}: ${globalInstruction}`;
                 optimizeForParallel: true
             });
 
-            // Timeout global por agente (120 segundos = 2 minutos)
-            const AGENT_TIMEOUT_MS = 120_000;
+            // Timeout global por agente (configurable desde .env, default 180s = 3 minutos)
+            const AGENT_TIMEOUT_MS = process.env.AGENT_TIMEOUT_MS 
+                ? parseInt(process.env.AGENT_TIMEOUT_MS, 10) 
+                : 180_000;
+            
+            // Timeout con heartbeat: verifica progreso antes de matar al agente
+            // Ajustar timeout según carga de paralelismo
+            const BASE_TIMEOUT = optimizeForManyAgents 
+                ? Math.min(AGENT_TIMEOUT_MS, 90_000) // 90s en modo de muchos agentes
+                : Math.min(AGENT_TIMEOUT_MS, 120_000); // 120s en modo normal
+            
+            const HEARTBEAT_CHECK_INTERVAL = 15_000; // Verificar cada 15 segundos
+            const MAX_IDLE_TIME = 45_000; // Máximo 45 segundos sin progreso antes de timeout
+            const MAX_TIMEOUT = BASE_TIMEOUT * 2; // Máximo 2x el timeout base si hay progreso constante
+            const LOW_CONFIDENCE_THRESHOLD = 50; // Confianza mínima para considerar progreso válido
+            
+            let timeoutId: NodeJS.Timeout | null = null;
+            let heartbeatIntervalId: NodeJS.Timeout | null = null;
+            let currentTimeout = BASE_TIMEOUT;
+            
             const agentPromise = agent.run({
                 url: target.url,
                 instruction,
@@ -345,11 +404,106 @@ Tarea específica para ${target.name}: ${globalInstruction}`;
                 context: context
             });
 
-            const timeoutPromise = new Promise<never>((_, reject) => 
-                setTimeout(() => reject(new Error(`Agent timeout after ${AGENT_TIMEOUT_MS / 1000}s`)), AGENT_TIMEOUT_MS)
-            );
+            // Crear promesa de timeout que se puede extender dinámicamente
+            const timeoutPromise = new Promise<never>((_, reject) => {
+                const scheduleTimeout = (timeoutMs: number) => {
+                    if (timeoutId) clearTimeout(timeoutId);
+                    timeoutId = setTimeout(async () => {
+                        // Cancelar agente primero para evitar operaciones adicionales
+                        agent.cancel();
+                        
+                        // Cerrar contexto de forma aislada ANTES de rechazar
+                        if (context && !contextClosed) {
+                            try {
+                                const pages = context.pages();
+                                await Promise.all(pages.map(page => page.close().catch(() => {})));
+                                await context.close();
+                                contextClosed = true;
+                            } catch (closeError: any) {
+                                if (!closeError.message?.includes('Target closed') && 
+                                    !closeError.message?.includes('Browser closed') &&
+                                    !closeError.message?.includes('context was destroyed')) {
+                                    console.warn(`   ⚠️ Error al cerrar contexto en timeout de ${target.name}: ${closeError.message}`);
+                                }
+                            }
+                        }
+                        
+                        // Limpiar intervalos
+                        if (heartbeatIntervalId) clearInterval(heartbeatIntervalId);
+                        
+                        reject(new Error(`Agent timeout after ${((Date.now() - startTime) / 1000).toFixed(0)}s`));
+                    }, timeoutMs);
+                };
+                
+                // Timeout inicial
+                scheduleTimeout(currentTimeout);
+                
+                // Heartbeat: verificar progreso periódicamente
+                heartbeatIntervalId = setInterval(() => {
+                    // Verificar progreso básico
+                    const hasProgress = agent.hasRecentProgress(MAX_IDLE_TIME / 1000);
+                    
+                    // Verificar cobertura del objetivo si está disponible (para extender timeout con baja confianza)
+                    // Nota: Esto requiere acceso al stateManager del agente, que no está expuesto actualmente
+                    // Por ahora, solo verificamos progreso básico
+                    
+                    if (hasProgress) {
+                        // El agente está haciendo progreso, extender timeout si no excede el máximo
+                        const elapsed = Date.now() - startTime;
+                        const remaining = MAX_TIMEOUT - elapsed;
+                        if (remaining > currentTimeout && remaining > 0) {
+                            const newTimeout = Math.min(remaining, BASE_TIMEOUT);
+                            if (newTimeout > currentTimeout) {
+                                currentTimeout = newTimeout;
+                                console.log(`   💓 Agente #${agentNumber} haciendo progreso. Extendiendo timeout a ${(currentTimeout / 1000).toFixed(0)}s restantes.`);
+                                scheduleTimeout(currentTimeout);
+                            }
+                        }
+                    } else {
+                        // Sin progreso reciente - verificar si debemos terminar
+                        const idleTime = Date.now() - agent.getLastProgressTimestamp();
+                        if (idleTime >= MAX_IDLE_TIME) {
+                            console.log(`   ⏱️ Agente #${agentNumber} sin progreso por ${(idleTime / 1000).toFixed(0)}s. Cancelando...`);
+                            agent.cancel();
+                            
+                            // Cerrar contexto
+                            if (context && !contextClosed) {
+                                Promise.all([
+                                    Promise.resolve(context.pages()).then(pages => 
+                                        Promise.all(pages.map(page => page.close().catch(() => {})))
+                                    ),
+                                    Promise.resolve(context.close())
+                                ]).catch(() => {});
+                                contextClosed = true;
+                            }
+                            
+                            // Limpiar intervalos
+                            if (timeoutId) clearTimeout(timeoutId);
+                            if (heartbeatIntervalId) clearInterval(heartbeatIntervalId);
+                            
+                            reject(new Error(`Agent idle timeout: no progress for ${(idleTime / 1000).toFixed(0)}s`));
+                        }
+                    }
+                }, HEARTBEAT_CHECK_INTERVAL);
+            });
 
-            const result = await Promise.race([agentPromise, timeoutPromise]);
+            let result;
+            try {
+                result = await Promise.race([
+                    agentPromise.then(r => {
+                        // Limpiar intervalos si el agente termina exitosamente
+                        if (timeoutId) clearTimeout(timeoutId);
+                        if (heartbeatIntervalId) clearInterval(heartbeatIntervalId);
+                        return r;
+                    }),
+                    timeoutPromise
+                ]);
+            } catch (error) {
+                // Limpiar intervalos en caso de error
+                if (timeoutId) clearTimeout(timeoutId);
+                if (heartbeatIntervalId) clearInterval(heartbeatIntervalId);
+                throw error;
+            }
 
             const duration = Date.now() - startTime;
             const rawData = result.data || [];
@@ -363,13 +517,20 @@ Tarea específica para ${target.name}: ${globalInstruction}`;
                 return true;
             });
             
+            // Evaluación de éxito basada en cobertura del objetivo y evidencia extraída
             const hasAvailability = dedupedInfo.some((d: { type?: string }) => /availability|disponibilidad|horario/i.test(d.type || ''));
             const instructionLower = instruction.toLowerCase();
             const objectiveWasAvailability = /horario|golf|disponible|mañana|reserva/i.test(instructionLower);
+            
+            // Usar cobertura del objetivo si está disponible
+            const objectiveCoverage = result.objectiveCoverage;
+            const hasGoodCoverage = objectiveCoverage && objectiveCoverage.coverage >= 60 && objectiveCoverage.confidence >= 50;
+            
             const isSuccess =
                 result.success ||
                 result.status === 'success' ||
-                (objectiveWasAvailability && hasAvailability);
+                (objectiveWasAvailability && hasAvailability) ||
+                (hasGoodCoverage && dedupedInfo.length > 0); // Éxito si hay buena cobertura y evidencia
 
             console.log(`   ${isSuccess ? '✅' : '❌'} Agente #${agentNumber} terminó: ${target.name} (${(duration / 1000).toFixed(1)}s)`);
 
@@ -387,20 +548,46 @@ Tarea específica para ${target.name}: ${globalInstruction}`;
 
         } catch (error) {
             const duration = Date.now() - startTime;
-            console.log(`   ❌ Agente #${agentNumber} error: ${target.name} - ${(error as Error).message}`);
+            const errorMessage = (error as Error).message;
+            const isTimeout = errorMessage.includes('timeout');
+            
+            console.log(`   ${isTimeout ? '⏱️' : '❌'} Agente #${agentNumber} ${isTimeout ? 'timeout' : 'error'}: ${target.name} - ${errorMessage}`);
 
             return {
                 result: {
                     target: target.name,
                     url: target.url,
-                    status: 'error',
+                    status: isTimeout ? 'failed' : 'error',
                     extractedInfo: [],
-                    summary: `Error: ${(error as Error).message}`,
+                    summary: isTimeout 
+                        ? `Timeout después de ${(duration / 1000).toFixed(1)}s - El agente no completó la tarea a tiempo`
+                        : `Error: ${errorMessage}`,
                     duration,
-                    error: (error as Error).message
+                    error: errorMessage
                 },
-                context
+                context: undefined // No devolver contexto si hubo error/timeout (ya cerrado)
             };
+        } finally {
+            // Cerrar contexto solo si no fue cerrado por timeout
+            // Esto previene cierres dobles y errores en cascada
+            if (context && !contextClosed) {
+                try {
+                    // Cerrar todas las páginas primero para evitar errores
+                    const pages = context.pages();
+                    await Promise.all(pages.map(page => page.close().catch(() => {})));
+                    // Luego cerrar el contexto
+                    await context.close();
+                    contextClosed = true;
+                } catch (closeError: any) {
+                    // Ignorar errores de cierre esperados
+                    if (!closeError.message?.includes('Target closed') && 
+                        !closeError.message?.includes('Browser closed') &&
+                        !closeError.message?.includes('context was destroyed') &&
+                        !closeError.message?.includes('Target page, context or browser has been closed')) {
+                        console.warn(`   ⚠️ Error al cerrar contexto de ${target.name}: ${closeError.message}`);
+                    }
+                }
+            }
         }
     }
 
