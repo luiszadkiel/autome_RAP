@@ -364,23 +364,9 @@ export class ParallelAgent {
             instruction = target.instruction.trim();
             console.log(`   🤖 Agente #${agentNumber} iniciando: ${target.name} (instrucción propia)`);
         } else {
-            // Filtrar instrucción global para que sea relevante solo a este sitio
-            let specificInstruction = globalInstruction;
-
-            // Heurística simple para separar intenciones
-            const isGolfSite = /golf|club|country/i.test(target.name) || /golf|club|country/i.test(target.url);
-            const isBookingSite = /vvauto|talleres|cita|booking/i.test(target.name) || /booking/i.test(target.url);
-
-            if (isGolfSite) {
-                // Eliminar referencias a reservas de servicios/talleres
-                specificInstruction = specificInstruction.replace(/reserva.*(vvauto|taller|cita)/gi, '').trim();
-                // Asegurar que menciona golf
-                if (!/golf/i.test(specificInstruction)) specificInstruction += " (focus on golf availability)";
-            } else if (isBookingSite) {
-                // Eliminar referencias a golf
-                specificInstruction = specificInstruction.replace(/horarios.*golf/gi, '').trim();
-                specificInstruction = specificInstruction.replace(/jugar.*golf/gi, '').trim();
-            }
+            // Filtrar instrucción global usando heurística robusta
+            let specificInstruction = this.splitInstructionForTarget(globalInstruction, target);
+            console.log(`   🤖 Agente #${agentNumber} instrucción segmentada: "${specificInstruction.substring(0, 100)}..."`);
 
             // Agregar contexto de aislamiento
             instruction = `IMPORTANTE: Eres el agente #${agentNumber} asignado SOLO a ${target.name} (${target.url}).
@@ -627,6 +613,34 @@ TU TAREA ESPECÍFICA para ${target.name}: ${specificInstruction}`;
                 }
             }
         }
+    }
+
+    private splitInstructionForTarget(globalInstruction: string, target: ParallelTarget): string {
+        // Separar por conectores: "y una", "y buscame", "y también", "además"
+        // Regex mejorada para capturar más variantes
+        const segments = globalInstruction.split(/\s+(?:y|e|ni|o|u)\s+(?=(?:una|un|el|la|los|las|buscame|búscame|también|además|hazme|quiero|necesito))/gi);
+
+        const relevantSegments = segments.filter(seg => {
+            const lower = seg.toLowerCase();
+            const targetLower = target.name.toLowerCase();
+            const urlLower = target.url.toLowerCase();
+
+            // Mapeo de keywords → sitios
+            if (/golf|club|country|cayacoa|pga|tee.?time|jugador/i.test(lower)) {
+                return /golf|club|country|cayacoa|pga/i.test(targetLower) || /golf|club|country/i.test(urlLower);
+            }
+            if (/vvauto|reserva|mantenimiento|cita|taller|vehículo|carro/i.test(lower)) {
+                return /vvauto|outlook|booking|taller/i.test(targetLower) || /outlook|book/i.test(urlLower);
+            }
+            if (/restaurant|opentable|romántic|cena|comida|reservar mesa/i.test(lower)) {
+                return /opentable|restaurant/i.test(targetLower) || /opentable/i.test(urlLower);
+            }
+            return true; // Si no matchea nada específico, incluirlo (podría ser contexto general irrelevante, o importante)
+        });
+
+        // Unir segmentos relevantes y limpiar espacios
+        const result = relevantSegments.join('. ').replace(/\s{2,}/g, ' ').trim();
+        return result || globalInstruction; // Fallback a global si no queda nada
     }
 
     /** Decodifica escapes Unicode (\uXXXX) en el texto para mostrar correctamente en el resumen. */

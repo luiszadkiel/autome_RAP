@@ -371,9 +371,13 @@ export class WebAgent {
             let warmedUp = false;
             const warmupMaxAttempts = 25; // Aumentado para SPAs muy pesadas
             const hostnameLower = hostname.toLowerCase();
-            const isKnownSlowSPA = /pgaoceans4|outlook|bookings|microsoft/i.test(hostnameLower);
+            const isKnownSlowSPA = /pgaoceans4|outlook|bookings|microsoft|cayacoa|golfmanager/i.test(hostnameLower);
 
             for (let i = 0; i < warmupMaxAttempts; i++) {
+                // Actualizar timestamp para evitar timeout por idle durante warm-up largo
+                this.lastProgressTimestamp = Date.now();
+                console.log(`   🔄 Warm-up intento ${i + 1}/${warmupMaxAttempts}...`);
+
                 try {
                     await this.page.waitForLoadState('domcontentloaded').catch(() => { });
 
@@ -423,6 +427,9 @@ export class WebAgent {
                     }
 
                     const warmupSnapshot = await this.snapshotExtractor.extract(this.page);
+
+                    console.log(`      📊 ${warmupSnapshot.elements.length} elementos (mínimo: 10)`);
+
                     if (warmupSnapshot.elements.length > 10) {
                         console.log(`✅ Página lista: ${warmupSnapshot.elements.length} elementos detectados.`);
                         warmedUp = true;
@@ -447,7 +454,7 @@ export class WebAgent {
                     }
                     if (msg.includes('context was destroyed') || msg.includes('navigation')) {
                         console.log('   ...página navegando, esperando estabilización...');
-                        await waitForPageReady(this.page, { timeout: 5000 }).catch(() => {});
+                        await waitForPageReady(this.page, { timeout: 5000 }).catch(() => { });
                         continue;
                     }
                     throw e;
@@ -490,6 +497,8 @@ export class WebAgent {
                     if (!stillOnLogin || loginBudget <= 1) {
                         const loginCheck = await this.loginVerifier.verify(this.page!, params.loginUrl);
                         console.log(`🔐 Login verification: ${loginCheck.isLoggedIn ? '✅' : '❌'} (${loginCheck.confidence}%)`);
+                        console.log(`   🔐 URL post-login: ${this.page.url()}`);
+
                         loginCheck.evidence.forEach(e => console.log(`   ${e}`));
                         if (!loginCheck.isLoggedIn) {
                             return this.createResult('login_failed', startTime, config.objective,
