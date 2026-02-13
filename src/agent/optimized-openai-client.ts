@@ -74,7 +74,7 @@ export class OptimizedOpenAIClient {
             snapshotFormatted: formatted.formattedElements,
             snapshotRaw: snapshot,
             objective,
-            structuredData,a
+            structuredData,
             history,
             lastResult,
             currentUrl: snapshot.url,
