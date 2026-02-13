@@ -55,8 +55,8 @@ export interface ProgressIndicators {
 
 export class StateManager {
     private state: AgentState;
-    private readonly STUCK_THRESHOLD = 3;
-    private readonly MAX_SAME_ACTION_REPEATS = 2;
+    private readonly STUCK_THRESHOLD = 5;
+    private readonly MAX_SAME_ACTION_REPEATS = 4;
 
     constructor(maxSteps: number = 30) {
         this.state = {

@@ -19,27 +19,34 @@ export class OutlookAdapter implements SiteAdapter {
 
     getCalendarStrategy(): CalendarStrategy | null {
         return {
-            calendarContainerSelector: '#app [class*="calendar"], #app [role="application"], .ms-DatePicker-picker, [class*="calendar"], [role="application"]',
-            daySelector: '#app button:not([disabled]), #app [role="gridcell"]:not([disabled]), button[class*="day"]:not([disabled]), [role="gridcell"]:not([disabled])',
-            nextMonthSelector: '#app button[aria-label*="Next"], #app button[title*="Next"], button[title="Next month"], button[aria-label="Next month"], [class*="nextMonth"]',
-            prevMonthSelector: '#app button[aria-label*="Previous"], #app button[title*="Previous"], button[title="Previous month"], button[aria-label="Previous month"], [class*="prevMonth"]',
+            calendarContainerSelector: '#app [class*="calendar"], #app [role="application"], .ms-DatePicker-picker, [class*="calendar"], [role="application"], [data-automation-id="calendar-view"]',
+            daySelector: '#app button:not([disabled]):not([aria-disabled="true"]), #app [role="gridcell"]:not([disabled]):not([aria-disabled="true"]), button[class*="day"]:not([disabled]), [role="gridcell"]:not([disabled]), [data-automation-id*="day-"]',
+            nextMonthSelector: '#app button[aria-label*="Next"], #app button[title*="Next"], button[title="Next month"], button[aria-label="Next month"], [class*="nextMonth"], [data-icon-name="ChevronRight"]',
+            prevMonthSelector: '#app button[aria-label*="Previous"], #app button[title*="Previous"], button[title="Previous month"], button[aria-label="Previous month"], [class*="prevMonth"], [data-icon-name="ChevronLeft"]',
             selectedDayClass: 'ms-DatePicker-day--selected',
             disabledDayClass: 'ms-DatePicker-day--disabled',
             getDayNumber(element: Element): number {
                 // Para Outlook Bookings, los días pueden estar en botones con números
                 const text = element.textContent?.trim() || '0';
                 const number = parseInt(text, 10);
-                // Si el texto contiene solo números (1-31), retornarlo
+
+                // Prioridad 1: Atributo aria-label que suele tener la fecha completa "14, February, 2026"
+                const ariaLabel = element.getAttribute('aria-label');
+                if (ariaLabel) {
+                    const match = ariaLabel.match(/(\d{1,2})[, ]/);
+                    if (match) return parseInt(match[1], 10);
+                }
+
+                // Prioridad 2: Texto directo (1-31)
                 if (!isNaN(number) && number >= 1 && number <= 31) {
                     return number;
                 }
-                // Intentar encontrar el número en atributos data-*
+
+                // Prioridad 3: Atributos data-*
                 const dataDate = element.getAttribute('data-date');
                 if (dataDate) {
                     const dateMatch = dataDate.match(/\d{4}-\d{2}-(\d{2})/);
-                    if (dateMatch) {
-                        return parseInt(dateMatch[1], 10);
-                    }
+                    if (dateMatch) return parseInt(dateMatch[1], 10);
                 }
                 return 0;
             }

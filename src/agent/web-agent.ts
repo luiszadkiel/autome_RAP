@@ -138,7 +138,7 @@ export class WebAgent {
      * Verifica si el agente está haciendo progreso real (heartbeat)
      * Retorna true si hubo progreso en los últimos X segundos
      */
-    hasRecentProgress(maxIdleSeconds: number = 30): boolean {
+    hasRecentProgress(maxIdleSeconds: number = 120): boolean {
         const idleTime = Date.now() - this.lastProgressTimestamp;
         return idleTime < maxIdleSeconds * 1000;
     }
@@ -439,9 +439,15 @@ export class WebAgent {
                         : (i < 8 ? 2000 : (i < 15 ? 3500 : 5000));
                     await waitForPageReady(this.page, { timeout: waitMs });
                 } catch (e: any) {
-                    if (e.message?.includes('context was destroyed') || e.message?.includes('navigation')) {
+                    const msg = e?.message || '';
+                    if (msg.includes('Target page, context or browser has been closed') ||
+                        msg.includes('Target closed') ||
+                        msg.includes('Browser closed')) {
+                        throw e; // Propagar para que el catch global devuelva context_closed
+                    }
+                    if (msg.includes('context was destroyed') || msg.includes('navigation')) {
                         console.log('   ...página navegando, esperando estabilización...');
-                        await waitForPageReady(this.page, { timeout: 5000 });
+                        await waitForPageReady(this.page, { timeout: 5000 }).catch(() => {});
                         continue;
                     }
                     throw e;
@@ -754,7 +760,9 @@ export class WebAgent {
                 // Ejecutar Batch de acciones
                 if (decision.actions.length === 0 && !decision.isComplete) {
                     console.log('   ⚠️ No hay acciones generadas, reintentando...');
-                    await this.page.waitForTimeout(1000);
+                    try {
+                        if (!this.page?.isClosed()) await this.page.waitForTimeout(1000);
+                    } catch (_) { /* página cerrada, salir en siguiente iteración */ }
                     continue;
                 }
 
@@ -848,7 +856,17 @@ export class WebAgent {
 
             return this.createResult('max_steps_reached', startTime, config.objective);
 
-        } catch (error) {
+        } catch (error: any) {
+            const errorMessage = error?.message || '';
+            const isContextClosed =
+                errorMessage.includes('Target page, context or browser has been closed') ||
+                errorMessage.includes('Target closed') ||
+                errorMessage.includes('Browser closed') ||
+                errorMessage.includes('context was destroyed');
+            if (isContextClosed) {
+                console.log('⚠️ Contexto o página cerrada. Terminando agente.');
+                return this.createResult('context_closed', startTime, config.objective, error as Error);
+            }
             console.error('❌ Error fatal:', error);
             return this.createResult('error', startTime, config.objective, error as Error);
 

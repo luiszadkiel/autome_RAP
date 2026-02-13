@@ -45,6 +45,11 @@ export class BatchActionExecutor {
 
         console.log(`📦 Ejecutando batch de ${batch.actions.length} acciones...`);
 
+        // No ejecutar si la página/contexto fue cerrado (p. ej. por timeout del agente)
+        if (currentPage.isClosed()) {
+            throw new Error('Target page, context or browser has been closed');
+        }
+
         // Pre-check: Si hay modal activo, intentar cerrarlo primero
         if (snapshot.pageState.hasModal) {
             await this.tryCloseModal(currentPage);
@@ -52,6 +57,9 @@ export class BatchActionExecutor {
 
         for (const action of batch.actions) {
             if (stop) break;
+            if (currentPage.isClosed()) {
+                throw new Error('Target page, context or browser has been closed');
+            }
 
             console.log(`   ▶️ ${action.action}${action.ref ? `[${action.ref}]` : ''} - ${action.why}`);
 
@@ -155,6 +163,9 @@ export class BatchActionExecutor {
         siteAdapter: SiteAdapter | null,
         credentials?: { email?: string; password?: string }
     ): Promise<void> {
+        if (page.isClosed()) {
+            throw new Error('Target page, context or browser has been closed');
+        }
 
         // Acciones que no requieren elemento: saltar resolución si ref es inválido
         const actionsWithoutElement = ['wait', 'scroll', 'done', 'back'];
@@ -213,7 +224,7 @@ export class BatchActionExecutor {
 
                         // Estrategia 1: Presionar Escape
                         await page.keyboard.press('Escape');
-                        await page.waitForTimeout(300);
+                        await this.safeWait(page, 300);
 
                         // Estrategia 2: Buscar y clickear botones de aceptar cookies/GDPR primero
                         const gdprAcceptSelectors = [
@@ -233,7 +244,7 @@ export class BatchActionExecutor {
                                 if (await btn.isVisible({ timeout: 500 })) {
                                     await btn.click({ timeout: 1000 });
                                     console.log('   🍪 Banner de cookies aceptado');
-                                    await page.waitForTimeout(500);
+                                    await this.safeWait(page, 500);
                                     gdprDismissed = true;
                                     break;
                                 }
@@ -266,7 +277,7 @@ export class BatchActionExecutor {
                                     });
                                     if (visible) {
                                         await closeBtn.click({ timeout: 1000 });
-                                        await page.waitForTimeout(300);
+                                        await this.safeWait(page, 300);
                                         break;
                                     }
                                 } catch { /* continuar con siguiente selector */ }
@@ -275,7 +286,7 @@ export class BatchActionExecutor {
 
                         // Reintentar click obligando force: true (fallback robusto)
                         console.log('   💪 Forzando click (fallback)...');
-                        await page.waitForTimeout(500);
+                        await this.safeWait(page, 500);
                         await locator.click({ timeout: 5000, force: true, noWaitAfter: true });
                     } else if (
                         errorMsg.includes('element is not enabled') ||
@@ -290,7 +301,7 @@ export class BatchActionExecutor {
                         try {
                             // Intentar hacer scroll al elemento
                             await locator.scrollIntoViewIfNeeded({ timeout: 3000 });
-                            await page.waitForTimeout(500);
+                            await this.safeWait(page, 500);
                             // Reintentar click después del scroll
                             await locator.click({ timeout: 5000, noWaitAfter: true });
                             console.log('   ✅ Click exitoso después de scroll');
@@ -298,7 +309,7 @@ export class BatchActionExecutor {
                             // Intentar cerrar posible modal con Escape primero
                             console.log('   ⌨️ Intentando cerrar modal con Escape...');
                             await page.keyboard.press('Escape');
-                            await page.waitForTimeout(500);
+                            await this.safeWait(page, 500);
 
                             try {
                                 // Reintentar después de Escape
@@ -382,7 +393,7 @@ export class BatchActionExecutor {
                         }).catch(() => { });
 
                         // Verificar que el valor se escribió correctamente
-                        await page.waitForTimeout(100);
+                        await this.safeWait(page, 100);
                         const currentValue = await locator.inputValue().catch(() => '');
                         if (currentValue !== valueToType && currentValue.length < valueToType.length) {
                             console.log('   ⚠️ Valor no coincide, reintentando con fill()...');
@@ -397,7 +408,7 @@ export class BatchActionExecutor {
                         // Si es campo password, presionar Enter para enviar el formulario
                         // Muchos SPAs no reaccionan al click del botón pero sí a Enter
                         if (targetElement?.type === 'password') {
-                            await page.waitForTimeout(200);
+                            await this.safeWait(page, 200);
                             await page.keyboard.press('Enter');
                             console.log('   ⏎ Login: Enter presionado después de contraseña');
                         }
@@ -412,7 +423,7 @@ export class BatchActionExecutor {
                             el.dispatchEvent(new Event('change', { bubbles: true }));
                         }).catch(() => { });
                         if (targetElement?.type === 'password') {
-                            await page.waitForTimeout(200);
+                            await this.safeWait(page, 200);
                             await page.keyboard.press('Enter');
                         }
                     }
@@ -471,7 +482,7 @@ export class BatchActionExecutor {
                     console.log(`   ⏳ Esperando ${action.value ? parseInt(action.value) : 2000}ms...`);
                 }
                 const ms = action.value ? parseInt(action.value) : 2000;
-                await page.waitForTimeout(ms);
+                await this.safeWait(page, ms);
                 break;
 
             case 'selectTimeSlot':
@@ -560,9 +571,16 @@ export class BatchActionExecutor {
     /** Espera sin lanzar si la página/contexto/browser ya fue cerrado (ej. ejecución paralela). */
     private async safeWait(page: Page, ms: number): Promise<void> {
         try {
+            if (page.isClosed()) return;
             await page.waitForTimeout(ms);
         } catch (e: any) {
-            if (e?.message?.includes('has been closed')) return;
+            const msg = e?.message || '';
+            if (msg.includes('has been closed') ||
+                msg.includes('Target closed') ||
+                msg.includes('Browser closed') ||
+                msg.includes('context was destroyed')) {
+                return;
+            }
             throw e;
         }
     }
@@ -711,7 +729,7 @@ export class BatchActionExecutor {
                 const closeBtn = page.locator(selector).first();
                 if (await closeBtn.isVisible({ timeout: 500 })) {
                     await closeBtn.click({ timeout: 2000 });
-                    await page.waitForTimeout(500);
+                    await this.safeWait(page, 500);
                     console.log('   ✅ Modal cerrado con botón');
                     return true;
                 }
@@ -721,7 +739,7 @@ export class BatchActionExecutor {
         // Estrategia 2: Presionar Escape
         try {
             await page.keyboard.press('Escape');
-            await page.waitForTimeout(500);
+            await this.safeWait(page, 500);
             console.log('   ⌨️ Escape enviado');
             return true;
         } catch { /* continuar */ }
@@ -731,7 +749,7 @@ export class BatchActionExecutor {
             const backdrop = page.locator('[class*="backdrop"], [class*="overlay"], .modal-backdrop').first();
             if (await backdrop.isVisible({ timeout: 500 })) {
                 await backdrop.click({ position: { x: 10, y: 10 }, force: true });
-                await page.waitForTimeout(500);
+                await this.safeWait(page, 500);
                 console.log('   🖱️ Click en backdrop');
                 return true;
             }

@@ -85,11 +85,11 @@ export class ParallelAgent {
             console.log(`   📌 ${targetsWithOwnInstruction} target(s) con instrucción propia`);
         }
         console.log(`   ⚡ Máximo paralelo: ${maxParallel}`);
-        
-        // Estrategia: usar múltiples navegadores si hay muchos agentes
-        const useMultipleBrowsers = maxParallel >= 7;
-        const browsersPerGroup = 3; // Máximo 3 pestañas por navegador para mejor rendimiento
-        
+
+        // Estrategia: usar múltiples navegadores si hay muchos agentes (o para aislamiento)
+        const useMultipleBrowsers = maxParallel >= 2;
+        const browsersPerGroup = 1; // Máximo 1 pestaña por navegador para aislamiento total
+
         if (useMultipleBrowsers) {
             console.log(`   🌐 Múltiples navegadores (${Math.ceil(maxParallel / browsersPerGroup)} navegadores)`);
         } else {
@@ -174,17 +174,17 @@ export class ParallelAgent {
     ): Promise<void> {
         // Crear navegador si no existe
         if (browsers.length === 0) {
-            browsers.push(await chromium.launch({ 
+            browsers.push(await chromium.launch({
                 headless: this.headless,
                 args: ['--disable-dev-shm-usage', '--disable-setuid-sandbox']
             }));
         }
         const browser = browsers[0];
 
-                // Ejecutar chunk en paralelo
-                const chunkPromises = chunk.map((target, index) =>
-                    this.runSingleAgent(target, instruction, startIndex + index + 1, browser, false)
-                );
+        // Ejecutar chunk en paralelo
+        const chunkPromises = chunk.map((target, index) =>
+            this.runSingleAgent(target, instruction, startIndex + index + 1, browser, false)
+        );
 
         const chunkResults = await Promise.allSettled(chunkPromises);
         const contextsToClose: BrowserContext[] = [];
@@ -219,12 +219,12 @@ export class ParallelAgent {
                 const pages = ctx.pages();
                 if (pages.length > 0) {
                     // Cerrar páginas primero
-                    await Promise.all(pages.map(page => page.close().catch(() => {})));
+                    await Promise.all(pages.map(page => page.close().catch(() => { })));
                 }
                 await ctx.close();
             } catch (closeError: any) {
                 // Ignorar errores de cierre esperados (contexto ya cerrado por timeout u otro agente)
-                if (!closeError.message?.includes('Target closed') && 
+                if (!closeError.message?.includes('Target closed') &&
                     !closeError.message?.includes('Browser closed') &&
                     !closeError.message?.includes('context was destroyed') &&
                     !closeError.message?.includes('Target page, context or browser has been closed')) {
@@ -244,89 +244,109 @@ export class ParallelAgent {
     ): Promise<void> {
         // Dividir chunk en grupos de navegadores
         const browserGroups = this.chunkArray(chunk, browsersPerGroup);
+        const groupPromises: Promise<void>[] = [];
 
         for (let groupIndex = 0; groupIndex < browserGroups.length; groupIndex++) {
             const group = browserGroups[groupIndex];
-            
-            // Crear navegador para este grupo si no existe
-            if (browsers.length <= groupIndex) {
-                browsers.push(await chromium.launch({ 
-                    headless: this.headless,
-                    args: [
-                        '--disable-dev-shm-usage',
-                        '--disable-setuid-sandbox',
-                        '--disable-gpu',
-                        '--no-sandbox',
-                        '--disable-software-rasterizer',
-                        '--disable-extensions'
-                    ]
-                }));
-            }
-            const browser = browsers[groupIndex];
 
-            // Ejecutar grupo en paralelo
-            const groupPromises = group.map((target, index) =>
-                this.runSingleAgent(
-                    target, 
-                    instruction, 
-                    startIndex + groupIndex * browsersPerGroup + index + 1, 
-                    browser,
-                    true // Optimizar para muchos agentes
-                )
-            );
-
-            const groupResults = await Promise.allSettled(groupPromises);
-            const contextsToClose: BrowserContext[] = [];
-
-            for (let i = 0; i < groupResults.length; i++) {
-                const settled = groupResults[i];
-                const target = group[i];
-
-                if (settled.status === 'fulfilled') {
-                    const { result: agentResult, context } = settled.value;
-                    results.push(agentResult);
-                    if (context) contextsToClose.push(context);
-                } else {
-                    results.push({
-                        target: target.name,
-                        url: target.url,
-                        status: 'error',
-                        extractedInfo: [],
-                        summary: `Error: ${settled.reason?.message || 'Unknown error'}`,
-                        duration: 0,
-                        error: settled.reason?.message
-                    });
-                }
-            }
-
-            // Cerrar contextos inmediatamente para liberar memoria (aislado para evitar errores en cascada)
-            // NOTA: Los contextos ya deberían estar cerrados por runSingleAgent, pero los cerramos aquí
-            // por si acaso para asegurar limpieza completa
-            await Promise.all(contextsToClose.map(async (ctx) => {
+            // Promesa que maneja todo el ciclo de vida del grupo (launch, run, close)
+            const groupExecution = async () => {
+                let browser: Browser | null = null;
                 try {
-                    // Verificar si el contexto ya está cerrado antes de intentar cerrarlo
-                    const pages = ctx.pages();
-                    if (pages.length > 0) {
-                        // Cerrar páginas primero
-                        await Promise.all(pages.map(page => page.close().catch(() => {})));
+                    // Crear navegador exclusivo para este grupo
+                    browser = await chromium.launch({
+                        headless: this.headless,
+                        args: [
+                            '--disable-dev-shm-usage',
+                            '--disable-setuid-sandbox',
+                            '--disable-gpu',
+                            '--no-sandbox',
+                            '--disable-software-rasterizer',
+                            '--disable-extensions'
+                        ]
+                    });
+
+                    // Agregar a la lista global para limpieza en caso de error fatal
+                    browsers.push(browser);
+
+                    // Ejecutar agentes del grupo en paralelo dentro de este navegador
+                    const agentPromises = group.map((target, index) =>
+                        this.runSingleAgent(
+                            target,
+                            instruction,
+                            startIndex + groupIndex * browsersPerGroup + index + 1,
+                            browser!,
+                            true // Optimizar para muchos agentes
+                        )
+                    );
+
+                    const agentResults = await Promise.allSettled(agentPromises);
+                    const contextsToClose: BrowserContext[] = [];
+
+                    for (let i = 0; i < agentResults.length; i++) {
+                        const settled = agentResults[i];
+                        const target = group[i];
+
+                        if (settled.status === 'fulfilled') {
+                            const { result: agentResult, context } = settled.value;
+                            results.push(agentResult);
+                            if (context) contextsToClose.push(context);
+                        } else {
+                            results.push({
+                                target: target.name,
+                                url: target.url,
+                                status: 'error',
+                                extractedInfo: [],
+                                summary: `Error: ${settled.reason?.message || 'Unknown error'}`,
+                                duration: 0,
+                                error: settled.reason?.message
+                            });
+                        }
                     }
-                    await ctx.close();
-                } catch (closeError: any) {
-                    // Ignorar errores de cierre esperados (contexto ya cerrado por timeout u otro agente)
-                    if (!closeError.message?.includes('Target closed') && 
-                        !closeError.message?.includes('Browser closed') &&
-                        !closeError.message?.includes('context was destroyed') &&
-                        !closeError.message?.includes('Target page, context or browser has been closed')) {
-                        console.warn(`   ⚠️ Error al cerrar contexto: ${closeError.message}`);
+
+                    // Cerrar contextos explícitamente (aunque runSingleAgent ya debería haberlo hecho)
+                    await Promise.all(contextsToClose.map(async (ctx) => {
+                        try {
+                            const pages = ctx.pages();
+                            if (pages.length > 0) await Promise.all(pages.map(page => page.close().catch(() => { })));
+                            await ctx.close();
+                        } catch (e) { }
+                    }));
+
+                } catch (error) {
+                    console.error(`❌ Error en grupo de navegador ${groupIndex + 1}:`, error);
+                    // Registrar error para todos los targets del grupo que falló
+                    for (const target of group) {
+                        results.push({
+                            target: target.name,
+                            url: target.url,
+                            status: 'error',
+                            extractedInfo: [],
+                            summary: `Error de navegador: ${(error as Error).message}`,
+                            duration: 0,
+                            error: (error as Error).message
+                        });
+                    }
+                } finally {
+                    // Cerrar navegador de este grupo inmediatamente
+                    if (browser) {
+                        await browser.close().catch(() => { });
+                        // Remover de la lista global si ya se cerró
+                        const idx = browsers.indexOf(browser);
+                        if (idx !== -1) browsers.splice(idx, 1);
                     }
                 }
-            }));
-            
-            // Pequeña pausa entre grupos para evitar sobrecarga
-            if (groupIndex < browserGroups.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 500));
-            }
+            };
+
+            // Iniciar ejecución sin bloqueo (sin await)
+            groupPromises.push(groupExecution());
+
+            // Pequeño delay de escalonamiento para no saturar CPU al inicio (100ms)
+            await new Promise(resolve => setTimeout(resolve, 100));
         }
+
+        // Esperar a que TODOS los grupos terminen
+        await Promise.allSettled(groupPromises);
     }
 
     private async runSingleAgent(
@@ -337,7 +357,7 @@ export class ParallelAgent {
         optimizeForManyAgents: boolean = false
     ): Promise<{ result: ParallelTargetResult; context?: BrowserContext }> {
         const startTime = Date.now();
-        
+
         // Aislar instrucción para este agente específico
         let instruction: string;
         if (target.instruction?.trim()) {
@@ -345,12 +365,30 @@ export class ParallelAgent {
             console.log(`   🤖 Agente #${agentNumber} iniciando: ${target.name} (instrucción propia)`);
         } else {
             // Filtrar instrucción global para que sea relevante solo a este sitio
-            // Agregar contexto de aislamiento para evitar que el agente intente hacer tareas de otros sitios
+            let specificInstruction = globalInstruction;
+
+            // Heurística simple para separar intenciones
+            const isGolfSite = /golf|club|country/i.test(target.name) || /golf|club|country/i.test(target.url);
+            const isBookingSite = /vvauto|talleres|cita|booking/i.test(target.name) || /booking/i.test(target.url);
+
+            if (isGolfSite) {
+                // Eliminar referencias a reservas de servicios/talleres
+                specificInstruction = specificInstruction.replace(/reserva.*(vvauto|taller|cita)/gi, '').trim();
+                // Asegurar que menciona golf
+                if (!/golf/i.test(specificInstruction)) specificInstruction += " (focus on golf availability)";
+            } else if (isBookingSite) {
+                // Eliminar referencias a golf
+                specificInstruction = specificInstruction.replace(/horarios.*golf/gi, '').trim();
+                specificInstruction = specificInstruction.replace(/jugar.*golf/gi, '').trim();
+            }
+
+            // Agregar contexto de aislamiento
             instruction = `IMPORTANTE: Eres el agente #${agentNumber} asignado SOLO a ${target.name} (${target.url}).
 Otros sitios son manejados por otros agentes. Enfócate SOLO en lo que puedes hacer en ESTE sitio.
 NO intentes navegar a otros sitios ni completar tareas destinadas a otros agentes.
 
-Tarea específica para ${target.name}: ${globalInstruction}`;
+Tarea GLOBAL: ${globalInstruction}
+TU TAREA ESPECÍFICA para ${target.name}: ${specificInstruction}`;
             console.log(`   🤖 Agente #${agentNumber} iniciando: ${target.name} (${target.url})`);
         }
 
@@ -377,25 +415,25 @@ Tarea específica para ${target.name}: ${globalInstruction}`;
             });
 
             // Timeout global por agente (configurable desde .env, default 180s = 3 minutos)
-            const AGENT_TIMEOUT_MS = process.env.AGENT_TIMEOUT_MS 
-                ? parseInt(process.env.AGENT_TIMEOUT_MS, 10) 
+            const AGENT_TIMEOUT_MS = process.env.AGENT_TIMEOUT_MS
+                ? parseInt(process.env.AGENT_TIMEOUT_MS, 10)
                 : 180_000;
-            
+
             // Timeout con heartbeat: verifica progreso antes de matar al agente
             // Ajustar timeout según carga de paralelismo
-            const BASE_TIMEOUT = optimizeForManyAgents 
-                ? Math.min(AGENT_TIMEOUT_MS, 90_000) // 90s en modo de muchos agentes
-                : Math.min(AGENT_TIMEOUT_MS, 120_000); // 120s en modo normal
-            
+            const BASE_TIMEOUT = optimizeForManyAgents
+                ? Math.min(AGENT_TIMEOUT_MS, 180_000) // 180s (3 min) en modo paralelo
+                : Math.min(AGENT_TIMEOUT_MS, 300_000); // 300s (5 min) en modo normal
+
             const HEARTBEAT_CHECK_INTERVAL = 15_000; // Verificar cada 15 segundos
-            const MAX_IDLE_TIME = 45_000; // Máximo 45 segundos sin progreso antes de timeout
+            const MAX_IDLE_TIME = 120_000; // Máximo 120 segundos sin progreso antes de timeout
             const MAX_TIMEOUT = BASE_TIMEOUT * 2; // Máximo 2x el timeout base si hay progreso constante
             const LOW_CONFIDENCE_THRESHOLD = 50; // Confianza mínima para considerar progreso válido
-            
+
             let timeoutId: NodeJS.Timeout | null = null;
             let heartbeatIntervalId: NodeJS.Timeout | null = null;
             let currentTimeout = BASE_TIMEOUT;
-            
+
             const agentPromise = agent.run({
                 url: target.url,
                 instruction,
@@ -411,42 +449,42 @@ Tarea específica para ${target.name}: ${globalInstruction}`;
                     timeoutId = setTimeout(async () => {
                         // Cancelar agente primero para evitar operaciones adicionales
                         agent.cancel();
-                        
+
                         // Cerrar contexto de forma aislada ANTES de rechazar
                         if (context && !contextClosed) {
                             try {
                                 const pages = context.pages();
-                                await Promise.all(pages.map(page => page.close().catch(() => {})));
+                                await Promise.all(pages.map(page => page.close().catch(() => { })));
                                 await context.close();
                                 contextClosed = true;
                             } catch (closeError: any) {
-                                if (!closeError.message?.includes('Target closed') && 
+                                if (!closeError.message?.includes('Target closed') &&
                                     !closeError.message?.includes('Browser closed') &&
                                     !closeError.message?.includes('context was destroyed')) {
                                     console.warn(`   ⚠️ Error al cerrar contexto en timeout de ${target.name}: ${closeError.message}`);
                                 }
                             }
                         }
-                        
+
                         // Limpiar intervalos
                         if (heartbeatIntervalId) clearInterval(heartbeatIntervalId);
-                        
+
                         reject(new Error(`Agent timeout after ${((Date.now() - startTime) / 1000).toFixed(0)}s`));
                     }, timeoutMs);
                 };
-                
+
                 // Timeout inicial
                 scheduleTimeout(currentTimeout);
-                
+
                 // Heartbeat: verificar progreso periódicamente
                 heartbeatIntervalId = setInterval(() => {
                     // Verificar progreso básico
                     const hasProgress = agent.hasRecentProgress(MAX_IDLE_TIME / 1000);
-                    
+
                     // Verificar cobertura del objetivo si está disponible (para extender timeout con baja confianza)
                     // Nota: Esto requiere acceso al stateManager del agente, que no está expuesto actualmente
                     // Por ahora, solo verificamos progreso básico
-                    
+
                     if (hasProgress) {
                         // El agente está haciendo progreso, extender timeout si no excede el máximo
                         const elapsed = Date.now() - startTime;
@@ -465,22 +503,22 @@ Tarea específica para ${target.name}: ${globalInstruction}`;
                         if (idleTime >= MAX_IDLE_TIME) {
                             console.log(`   ⏱️ Agente #${agentNumber} sin progreso por ${(idleTime / 1000).toFixed(0)}s. Cancelando...`);
                             agent.cancel();
-                            
+
                             // Cerrar contexto
                             if (context && !contextClosed) {
                                 Promise.all([
-                                    Promise.resolve(context.pages()).then(pages => 
-                                        Promise.all(pages.map(page => page.close().catch(() => {})))
+                                    Promise.resolve(context.pages()).then(pages =>
+                                        Promise.all(pages.map(page => page.close().catch(() => { })))
                                     ),
                                     Promise.resolve(context.close())
-                                ]).catch(() => {});
+                                ]).catch(() => { });
                                 contextClosed = true;
                             }
-                            
+
                             // Limpiar intervalos
                             if (timeoutId) clearTimeout(timeoutId);
                             if (heartbeatIntervalId) clearInterval(heartbeatIntervalId);
-                            
+
                             reject(new Error(`Agent idle timeout: no progress for ${(idleTime / 1000).toFixed(0)}s`));
                         }
                     }
@@ -507,7 +545,7 @@ Tarea específica para ${target.name}: ${globalInstruction}`;
 
             const duration = Date.now() - startTime;
             const rawData = result.data || [];
-            
+
             // Deduplicar extractedInfo antes de agregarlo al resultado
             const seen = new Set<string>();
             const dedupedInfo = rawData.filter((info: { type?: string; content?: string }) => {
@@ -516,16 +554,16 @@ Tarea específica para ${target.name}: ${globalInstruction}`;
                 seen.add(key);
                 return true;
             });
-            
+
             // Evaluación de éxito basada en cobertura del objetivo y evidencia extraída
             const hasAvailability = dedupedInfo.some((d: { type?: string }) => /availability|disponibilidad|horario/i.test(d.type || ''));
             const instructionLower = instruction.toLowerCase();
             const objectiveWasAvailability = /horario|golf|disponible|mañana|reserva/i.test(instructionLower);
-            
+
             // Usar cobertura del objetivo si está disponible
             const objectiveCoverage = result.objectiveCoverage;
             const hasGoodCoverage = objectiveCoverage && objectiveCoverage.coverage >= 60 && objectiveCoverage.confidence >= 50;
-            
+
             const isSuccess =
                 result.success ||
                 result.status === 'success' ||
@@ -550,7 +588,7 @@ Tarea específica para ${target.name}: ${globalInstruction}`;
             const duration = Date.now() - startTime;
             const errorMessage = (error as Error).message;
             const isTimeout = errorMessage.includes('timeout');
-            
+
             console.log(`   ${isTimeout ? '⏱️' : '❌'} Agente #${agentNumber} ${isTimeout ? 'timeout' : 'error'}: ${target.name} - ${errorMessage}`);
 
             return {
@@ -559,7 +597,7 @@ Tarea específica para ${target.name}: ${globalInstruction}`;
                     url: target.url,
                     status: isTimeout ? 'failed' : 'error',
                     extractedInfo: [],
-                    summary: isTimeout 
+                    summary: isTimeout
                         ? `Timeout después de ${(duration / 1000).toFixed(1)}s - El agente no completó la tarea a tiempo`
                         : `Error: ${errorMessage}`,
                     duration,
@@ -574,13 +612,13 @@ Tarea específica para ${target.name}: ${globalInstruction}`;
                 try {
                     // Cerrar todas las páginas primero para evitar errores
                     const pages = context.pages();
-                    await Promise.all(pages.map(page => page.close().catch(() => {})));
+                    await Promise.all(pages.map(page => page.close().catch(() => { })));
                     // Luego cerrar el contexto
                     await context.close();
                     contextClosed = true;
                 } catch (closeError: any) {
                     // Ignorar errores de cierre esperados
-                    if (!closeError.message?.includes('Target closed') && 
+                    if (!closeError.message?.includes('Target closed') &&
                         !closeError.message?.includes('Browser closed') &&
                         !closeError.message?.includes('context was destroyed') &&
                         !closeError.message?.includes('Target page, context or browser has been closed')) {
@@ -686,19 +724,19 @@ Tarea específica para ${target.name}: ${globalInstruction}`;
         const byType: Record<string, Array<{ target: string; content: string }>> = {};
         // Map para deduplicar contenido exacto por tipo
         const seenContent = new Map<string, Set<string>>(); // tipo -> Set de contenidos ya vistos
-        
+
         for (const result of resultsWithInfo) {
             for (const info of result.extractedInfo) {
                 if (!byType[info.type]) {
                     byType[info.type] = [];
                     seenContent.set(info.type, new Set());
                 }
-                
+
                 const decodedContent = this.decodeUnicodeEscapes(info.content);
                 // Normalizar contenido para comparación (quitar espacios extra, lowercase)
                 const normalizedContent = decodedContent.replace(/\s+/g, ' ').trim().toLowerCase();
                 const contentSet = seenContent.get(info.type)!;
-                
+
                 // Solo agregar si no hemos visto este contenido exacto antes
                 if (!contentSet.has(normalizedContent)) {
                     contentSet.add(normalizedContent);

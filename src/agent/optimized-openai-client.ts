@@ -45,7 +45,7 @@ export class OptimizedOpenAIClient {
     private formatter: SnapshotFormatter;
     private options: Required<Pick<OpenAIClientOptions, 'model' | 'maxTokens'>> & Pick<OpenAIClientOptions, 'useMiniForSimpleSteps'>;
     /** Límite aproximado de tokens para el historial (evita prompts gigantes) */
-    private readonly MAX_HISTORY_TOKENS = 2000; // ~500 tokens por mensaje promedio
+    private readonly MAX_HISTORY_TOKENS = 4000; // ~1000 tokens por mensaje promedio
     /** Último timestamp de llamada para rate limiting */
     private lastCallTimestamp: number = 0;
     /** Cola de llamadas pendientes para rate limiting */
@@ -61,26 +61,26 @@ export class OptimizedOpenAIClient {
             useMiniForSimpleSteps: options?.useMiniForSimpleSteps ?? false
         };
     }
-    
+
     /**
      * Estima tokens aproximados en un texto (4 caracteres ≈ 1 token)
      */
     private estimateTokens(text: string): number {
         return Math.ceil(text.length / 4);
     }
-    
+
     /**
      * Limpia el historial manteniendo solo los mensajes más recientes que quepan en el límite de tokens
      */
     private trimHistoryToTokenLimit(): void {
         let totalTokens = 0;
         const trimmed: typeof this.conversationHistory = [];
-        
+
         // Recorrer desde el final (más reciente) hacia atrás
         for (let i = this.conversationHistory.length - 1; i >= 0; i--) {
             const msg = this.conversationHistory[i];
             const msgTokens = this.estimateTokens(msg.content);
-            
+
             if (totalTokens + msgTokens <= this.MAX_HISTORY_TOKENS) {
                 trimmed.unshift(msg);
                 totalTokens += msgTokens;
@@ -88,7 +88,7 @@ export class OptimizedOpenAIClient {
                 break;
             }
         }
-        
+
         this.conversationHistory = trimmed;
     }
 
@@ -132,10 +132,10 @@ export class OptimizedOpenAIClient {
             if (timeSinceLastCall < RATE_LIMIT_MS) {
                 await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_MS - timeSinceLastCall));
             }
-            
+
             // Usar historial ya recortado por tokens
             const historyToUse = this.conversationHistory.slice(-6); // Máximo 6 mensajes (3 turnos)
-            
+
             const response = await this.client.chat.completions.create({
                 model,
                 messages: [
@@ -148,7 +148,7 @@ export class OptimizedOpenAIClient {
                 max_tokens: this.options.maxTokens,
                 top_p: 0.95
             });
-            
+
             this.lastCallTimestamp = Date.now();
 
             const content = response.choices[0].message.content || '{}';
@@ -156,16 +156,16 @@ export class OptimizedOpenAIClient {
             // 3. Guardar historial (solo si no excede límite de tokens)
             const userTokens = this.estimateTokens(userPrompt);
             const assistantTokens = this.estimateTokens(content);
-            
+
             // Agregar mensajes
             this.conversationHistory.push(
                 { role: 'user', content: userPrompt },
                 { role: 'assistant', content: content }
             );
-            
+
             // Limpiar historial basado en tokens en lugar de solo cantidad de mensajes
             this.trimHistoryToTokenLimit();
-            
+
             // Log si el historial fue recortado significativamente
             if (this.conversationHistory.length < 4) {
                 console.log(`   📝 Historial recortado a ${this.conversationHistory.length} mensajes (límite de tokens)`);
@@ -176,7 +176,7 @@ export class OptimizedOpenAIClient {
 
         } catch (error: any) {
             console.error('❌ Error en OpenAI:', error);
-            
+
             // Detectar rate limit (429)
             if (error?.status === 429 || error?.message?.includes('rate limit')) {
                 console.warn('⚠️ Rate limit alcanzado. Esperando antes de reintentar...');
@@ -207,7 +207,7 @@ export class OptimizedOpenAIClient {
                     console.error('❌ Retry falló:', retryError);
                 }
             }
-            
+
             // Fallback en caso de error de API
             return {
                 thinking: 'Error de API, esperando recuperación',
