@@ -365,8 +365,28 @@ export class BatchActionExecutor {
                     try {
                         await locator.click({ timeout: 3000 }).catch(() => { });
                         await locator.clear().catch(() => { });
-                        await locator.pressSequentially(valueToType, { delay: 30 });
+                        // Aumentar delay para SPAs de React/Angular (50ms en vez de 30ms)
+                        await locator.pressSequentially(valueToType, { delay: 50 });
                         console.log('   ⌨️ Login: escrito con pressSequentially (SPA compatible)');
+
+                        // Disparar eventos manualmente para SPAs
+                        await locator.evaluate((el) => {
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        }).catch(() => { });
+
+                        // Verificar que el valor se escribió correctamente
+                        await page.waitForTimeout(100);
+                        const currentValue = await locator.inputValue().catch(() => '');
+                        if (currentValue !== valueToType && currentValue.length < valueToType.length) {
+                            console.log('   ⚠️ Valor no coincide, reintentando con fill()...');
+                            await locator.clear();
+                            await locator.fill(valueToType);
+                            await locator.evaluate((el) => {
+                                el.dispatchEvent(new Event('input', { bubbles: true }));
+                                el.dispatchEvent(new Event('change', { bubbles: true }));
+                            }).catch(() => { });
+                        }
 
                         // Si es campo password, presionar Enter para enviar el formulario
                         // Muchos SPAs no reaccionan al click del botón pero sí a Enter
@@ -380,6 +400,11 @@ export class BatchActionExecutor {
                         console.log('   🔄 pressSequentially falló en login, intentando fill()...');
                         await locator.clear().catch(() => { });
                         await locator.fill(valueToType);
+                        // Disparar eventos también en fallback
+                        await locator.evaluate((el) => {
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        }).catch(() => { });
                         if (targetElement?.type === 'password') {
                             await page.waitForTimeout(200);
                             await page.keyboard.press('Enter');
@@ -391,6 +416,11 @@ export class BatchActionExecutor {
 
                     try {
                         await locator.fill(valueToType);
+                        // Disparar eventos para SPAs
+                        await locator.evaluate((el) => {
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        }).catch(() => { });
                     } catch (fillError: any) {
                         if (fillError.message.includes('Element is not an <input>')) {
                             console.log('   ⚠️ Elemento no es input, intentando escribir en elemento activo...');
@@ -401,6 +431,11 @@ export class BatchActionExecutor {
                             try {
                                 await locator.clear().catch(() => { });
                                 await locator.pressSequentially(valueToType, { delay: 30 });
+                                // Disparar eventos también en fallback
+                                await locator.evaluate((el) => {
+                                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                                }).catch(() => { });
                             } catch {
                                 throw fillError;
                             }

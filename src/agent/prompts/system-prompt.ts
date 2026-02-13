@@ -404,8 +404,9 @@ export function buildUserPrompt(params: {
   history: ActionHistory[];
   lastResult?: ActionResult;
   currentUrl: string;
+  blockedRefs?: Set<string>;
 }): string {
-  const { snapshotFormatted, snapshotRaw, objective, structuredData, history, lastResult, currentUrl } = params;
+  const { snapshotFormatted, snapshotRaw, objective, structuredData, history, lastResult, currentUrl, blockedRefs } = params;
 
   let prompt = `## OBJETIVO
 ${objective}
@@ -475,7 +476,7 @@ ${objective}
       }
     }
 
-    // Detectar loop de navegación de calendario (clicks en flechas de mes)
+    // Detectar loop de navegación de calendario (clicks en flechas de mes) - más agresivo (2 clicks)
     const calendarNavActions = history.filter(a => {
       const reason = (a.reason || '').toLowerCase();
       return a.action === 'click' && (
@@ -484,17 +485,20 @@ ${objective}
         reason.includes('calendario') ||
         reason.includes('calendar') ||
         reason.includes('siguiente') ||
+        reason.includes('next month') ||
         reason.includes('anterior') ||
-        reason.includes('navegar')
+        reason.includes('previous month') ||
+        reason.includes('navegar') ||
+        reason.includes('navigate')
       );
     });
-    if (calendarNavActions.length >= 3) {
-      prompt += `\n## 🚨 CALENDAR NAVIGATION LOOP DETECTED!
-- Has hecho click en flechas de navegación del calendario ${calendarNavActions.length} veces.
+    if (calendarNavActions.length >= 2) {
+      prompt += `\n## 🚨 STOP: YA NAVEGASTE EL CALENDARIO ${calendarNavActions.length} VECES!
+- DETÉN la navegación de meses AHORA.
 - La fecha objetivo es "MAÑANA" - el calendario DEBERÍA estar ya en el mes correcto al cargar.
-- ⛔ DETÉN la navegación de meses. Busca el número del día directamente en la vista actual.
-- Si el calendario muestra el mes correcto, busca el día directamente sin navegar más.
-- Si después de 2 intentos más no encuentras el día, reporta "done" con fallo.
+- Busca el número del día directamente en el mes que se muestra actualmente.
+- Si no encuentras el día en el mes actual, reporta error — NO sigas navegando meses.
+- ⛔ PROHIBIDO hacer más clicks en flechas de navegación del calendario.
 `;
     }
 
@@ -576,6 +580,17 @@ ${objective}
 - Si el calendario muestra ${tomorrowMonth}, busca el día ${tomorrowNum} directamente.
 - Si estás en otro mes, navega SOLO hasta ${tomorrowMonth}, no más allá.
 `;
+  }
+
+  // Mostrar elementos bloqueados si existen
+  if (blockedRefs && blockedRefs.size > 0) {
+    prompt += `\n## ⛔ ELEMENTOS BLOQUEADOS (NO USAR)
+- Los siguientes elementos ya fallaron 2+ veces y NO deben usarse:
+`;
+    blockedRefs.forEach(ref => {
+      prompt += `  - [${ref}] - PROHIBIDO hacer click aquí\n`;
+    });
+    prompt += `- Debes intentar un enfoque completamente diferente.\n`;
   }
 
   // Agregar elementos formateados

@@ -261,7 +261,23 @@ export class WebAgent {
             }
 
             if (!warmedUp) {
-                console.warn('⚠️ Advertencia: Warm-up no detectó suficientes elementos, continuando de todos modos...');
+                console.warn('⚠️ Advertencia: Warm-up no detectó suficientes elementos, intentando reload...');
+                // Intentar 1 reload antes de rendirse
+                try {
+                    await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 10000 });
+                    await waitForPageReady(this.page, { timeout: 5000 });
+                    const retrySnapshot = await this.snapshotExtractor.extract(this.page);
+                    if (retrySnapshot.elements.length < 5) {
+                        console.log('❌ Página no responde después de reload. Abortando.');
+                        return this.createResult('page_unresponsive', startTime, config.objective,
+                            new Error('La página no cargó contenido interactivo después del warm-up + reload'));
+                    }
+                    console.log(`✅ Después de reload: ${retrySnapshot.elements.length} elementos detectados.`);
+                } catch (reloadError) {
+                    console.log('❌ Error en reload, abortando:', (reloadError as Error).message);
+                    return this.createResult('page_unresponsive', startTime, config.objective,
+                        reloadError as Error);
+                }
             }
 
             // 5. Loop principal (con presupuesto de login separado)
@@ -311,6 +327,31 @@ export class WebAgent {
                     return this.createResult('payment_detected', startTime, config.objective);
                 }
 
+                // Early exit: Si ya extrajimos la información solicitada y es solo extracción
+                if (this.isExtractionObjective(config.objective) && loginCompleted) {
+                    const extractedInfo = this.stateManager.getExtractedInfo();
+                    const hasRelevantInfo = extractedInfo.length > 0;
+                    // Si tenemos información relevante y ya pasamos el login, considerar éxito temprano
+                    if (hasRelevantInfo && this.stateManager.getState().currentStep >= 2) {
+                        const objectiveLower = config.objective.toLowerCase();
+                        const hasAvailability = extractedInfo.some(i => 
+                            i.type === 'availability' || 
+                            /horario|disponible|availability/i.test(i.content)
+                        );
+                        const hasPrice = extractedInfo.some(i => 
+                            i.type === 'price' || 
+                            /precio|price|RD\$|\$|€|£/i.test(i.content)
+                        );
+                        
+                        // Si el objetivo es buscar horarios/precios y ya los tenemos, terminar
+                        if ((/horario|golf|disponible|mañana/i.test(objectiveLower) && hasAvailability) ||
+                            (/precio|price/i.test(objectiveLower) && hasPrice)) {
+                            console.log('✅ Información solicitada ya extraída. Terminando temprano.');
+                            return this.createResult('success', startTime, config.objective);
+                        }
+                    }
+                }
+
                 // Tomar snapshot
                 console.log(`\n📍 Paso ${this.stateManager.getState().currentStep + 1}`);
                 let snapshot = await this.snapshotExtractor.extract(this.page);
@@ -344,18 +385,34 @@ export class WebAgent {
                     // Si agotamos intentos de recuperación, continuamos al LLM para nueva estrategia
                 }
 
+                // Detectar clicks repetidos al mismo elemento (limitar a 2 intentos)
+                const lastActions = this.stateManager.getState().executedActions.slice(-3);
+                const repeatedClick = lastActions.filter(a => 
+                    a.action === 'click' && 
+                    a.target === lastActions[0]?.target && 
+                    !a.success &&
+                    lastActions[0]?.target !== undefined
+                );
+                const blockedRefs = new Set<string>();
+                if (repeatedClick.length >= 2 && lastActions[0]?.target) {
+                    blockedRefs.add(lastActions[0].target);
+                    console.log(`   ⚠️ Bloqueando click repetido en [${lastActions[0].target}] - ya falló 2 veces`);
+                }
+
                 // Decisión local: si hay un solo botón obvio (Aceptar, Siguiente...), ejecutar sin LLM
                 let decision: BatchDecision | null = tryObviousLocalDecision(snapshot);
                 if (decision) {
                     console.log('   ⚡ Decisión local (sin LLM):', decision.actions[0]?.why ?? 'click obvio');
                 } else {
                     console.log('   🤖 Pensando...');
+                    // Pasar blockedRefs al prompt para que el LLM no los use
                     decision = await this.openaiClient.planActions(
                         snapshot,
                         config.objective,
                         config.structuredData,
                         this.stateManager.getActionHistory(),
-                        lastResult
+                        lastResult,
+                        blockedRefs
                     );
                     console.log(`   🤔 "Thinking": ${decision.thinking}`);
                 }

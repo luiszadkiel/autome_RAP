@@ -250,10 +250,25 @@ export class StateManager {
      * Agrega información extraída durante la navegación
      */
     addExtractedInfo(info: Omit<ExtractedInfo, 'timestamp'>): void {
-        this.state.extractedInfo.push({
-            ...info,
-            timestamp: Date.now()
-        });
+        // Deduplicar en tiempo real: normalizar contenido para comparación
+        const normalizedContent = (info.content || '').trim().toLowerCase();
+        const key = `${info.type || 'unknown'}:${normalizedContent}`;
+        
+        // Verificar si ya existe información duplicada
+        const isDuplicate = this.state.extractedInfo.some(
+            existing => {
+                const existingNormalized = (existing.content || '').trim().toLowerCase();
+                const existingKey = `${existing.type || 'unknown'}:${existingNormalized}`;
+                return existingKey === key;
+            }
+        );
+        
+        if (!isDuplicate) {
+            this.state.extractedInfo.push({
+                ...info,
+                timestamp: Date.now()
+            });
+        }
     }
 
     /**

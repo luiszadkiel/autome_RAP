@@ -335,13 +335,21 @@ Tarea específica para ${target.name}: ${globalInstruction}`;
                 optimizeForParallel: true
             });
 
-            const result = await agent.run({
+            // Timeout global por agente (120 segundos = 2 minutos)
+            const AGENT_TIMEOUT_MS = 120_000;
+            const agentPromise = agent.run({
                 url: target.url,
                 instruction,
                 credentials: target.credentials,
                 loginUrl: target.loginUrl,
                 context: context
             });
+
+            const timeoutPromise = new Promise<never>((_, reject) => 
+                setTimeout(() => reject(new Error(`Agent timeout after ${AGENT_TIMEOUT_MS / 1000}s`)), AGENT_TIMEOUT_MS)
+            );
+
+            const result = await Promise.race([agentPromise, timeoutPromise]);
 
             const duration = Date.now() - startTime;
             const rawData = result.data || [];

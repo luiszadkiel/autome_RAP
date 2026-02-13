@@ -60,7 +60,8 @@ export class OptimizedOpenAIClient {
         objective: string,
         structuredData: StructuredData,
         history: ActionHistory[],
-        lastResult?: ActionResult
+        lastResult?: ActionResult,
+        blockedRefs?: Set<string>
     ): Promise<BatchDecision> {
 
         // 0. Formatear snapshot para LLM
@@ -73,10 +74,11 @@ export class OptimizedOpenAIClient {
             snapshotFormatted: formatted.formattedElements,
             snapshotRaw: snapshot,
             objective,
-            structuredData,
+            structuredData,a
             history,
             lastResult,
-            currentUrl: snapshot.url
+            currentUrl: snapshot.url,
+            blockedRefs
         });
 
         const model = this.options.useMiniForSimpleSteps &&
