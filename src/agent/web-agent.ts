@@ -69,7 +69,7 @@ export class WebAgent {
     private loginVerifier: LoginVerifier;
     /** Respuestas API/XHR capturadas para contexto del LLM (precios, disponibilidad, etc.) */
     private capturedApiData: { url: string; data: unknown }[] = [];
-    
+
     /**
      * Limpia capturedApiData para evitar memory leaks
      * Se llama automáticamente cuando se alcanza el límite
@@ -172,32 +172,32 @@ export class WebAgent {
     private async checkBrowserHealth(): Promise<boolean> {
         try {
             if (!this.page || !this.context) return false;
-            
+
             // Verificar que la página no esté cerrada
             if (this.page.isClosed()) {
                 console.warn('⚠️ Browser health check: página cerrada');
                 return false;
             }
-            
+
             // Verificar que el contexto no esté cerrado
             const pages = this.context.pages();
             if (pages.length === 0 && this.page.isClosed()) {
                 console.warn('⚠️ Browser health check: contexto sin páginas');
                 return false;
             }
-            
+
             // Intentar una operación simple para verificar que el browser responde
             try {
                 await this.page.evaluate(() => document.readyState);
             } catch (e: any) {
-                if (e.message?.includes('Target closed') || 
+                if (e.message?.includes('Target closed') ||
                     e.message?.includes('Browser closed') ||
                     e.message?.includes('context was destroyed')) {
                     console.warn('⚠️ Browser health check: browser no responde');
                     return false;
                 }
             }
-            
+
             return true;
         } catch (error) {
             console.warn('⚠️ Browser health check falló:', (error as Error).message);
@@ -210,9 +210,9 @@ export class WebAgent {
      */
     private startBrowserHealthChecks(): void {
         if (this.browserHealthCheckInterval) return; // Ya está corriendo
-        
+
         const HEALTH_CHECK_INTERVAL = 30_000; // Cada 30 segundos
-        
+
         this.browserHealthCheckInterval = setInterval(async () => {
             const isHealthy = await this.checkBrowserHealth();
             if (!isHealthy) {
@@ -246,7 +246,7 @@ export class WebAgent {
         this.abortController = new AbortController();
         this.lastProgressTimestamp = Date.now();
         this.lastStepCount = 0;
-        
+
         // Iniciar health checks del browser
         this.startBrowserHealthChecks();
 
@@ -317,7 +317,7 @@ export class WebAgent {
                         // Limitar tamaño de datos capturados para evitar memory leaks
                         const dataSize = JSON.stringify(data).length;
                         const MAX_DATA_SIZE = 50_000; // 50KB por respuesta
-                        
+
                         if (dataSize <= MAX_DATA_SIZE) {
                             this.capturedApiData.push({ url, data });
                             this.cleanupCapturedApiData();
@@ -372,10 +372,31 @@ export class WebAgent {
             const warmupMaxAttempts = 25; // Aumentado para SPAs muy pesadas
             const hostnameLower = hostname.toLowerCase();
             const isKnownSlowSPA = /pgaoceans4|outlook|bookings|microsoft/i.test(hostnameLower);
-            
+
             for (let i = 0; i < warmupMaxAttempts; i++) {
                 try {
                     await this.page.waitForLoadState('domcontentloaded').catch(() => { });
+
+                    // Para SPAs pesadas: esperar a que JavaScript termine de inicializar
+                    if (isKnownSlowSPA && i >= 3) {
+                        // Esperar a que scripts externos terminen de cargar
+                        await this.page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => { });
+
+                        // Esperar a que elementos con data-toggle-class se inicialicen
+                        await this.page.evaluate(() => {
+                            return new Promise<void>((resolve) => {
+                                const checkInitialized = () => {
+                                    const toggleElements = document.querySelectorAll('[data-toggle-class]');
+                                    if (toggleElements.length === 0 || document.readyState === 'complete') {
+                                        resolve();
+                                    } else {
+                                        setTimeout(checkInitialized, 200);
+                                    }
+                                };
+                                checkInitialized();
+                            });
+                        }).catch(() => { });
+                    }
 
                     // Intentar aceptar cookies/banners automáticamente en sitios conocidos
                     if (i === 2 && isKnownSlowSPA) {
@@ -413,7 +434,7 @@ export class WebAgent {
                     }
                     // SPAs lentas (pgaoceans4, Outlook Bookings): esperar más entre intentos
                     // Aumentar progresivamente el timeout para SPAs muy pesadas
-                    const waitMs = isKnownSlowSPA 
+                    const waitMs = isKnownSlowSPA
                         ? (i < 8 ? 3000 : (i < 15 ? 5000 : (i < 20 ? 7000 : 10000)))
                         : (i < 8 ? 2000 : (i < 15 ? 3500 : 5000));
                     await waitForPageReady(this.page, { timeout: waitMs });
@@ -470,6 +491,8 @@ export class WebAgent {
                         }
                         loginCompleted = true;
                         this.stateManager.resetStepCount();
+                        // Resetear tracking de snapshots después de login exitoso
+                        this.snapshotExtractor.resetTracking();
                         console.log(`✅ Login completado. Reseteando contador para tarea.`);
                     } else {
                         loginBudget--;
@@ -501,15 +524,15 @@ export class WebAgent {
                     // Si tenemos información relevante y ya pasamos el login, considerar éxito temprano
                     if (hasRelevantInfo && this.stateManager.getState().currentStep >= 2) {
                         const objectiveLower = config.objective.toLowerCase();
-                        const hasAvailability = extractedInfo.some(i => 
-                            i.type === 'availability' || 
+                        const hasAvailability = extractedInfo.some(i =>
+                            i.type === 'availability' ||
                             /horario|disponible|availability/i.test(i.content)
                         );
-                        const hasPrice = extractedInfo.some(i => 
-                            i.type === 'price' || 
+                        const hasPrice = extractedInfo.some(i =>
+                            i.type === 'price' ||
                             /precio|price|RD\$|\$|€|£/i.test(i.content)
                         );
-                        
+
                         // Si el objetivo es buscar horarios/precios y ya los tenemos, terminar
                         if ((/horario|golf|disponible|mañana/i.test(objectiveLower) && hasAvailability) ||
                             (/precio|price/i.test(objectiveLower) && hasPrice)) {
@@ -570,8 +593,8 @@ export class WebAgent {
                 const actionHistory = this.stateManager.getActionHistory();
                 if (actionHistory.length >= 4) {
                     const lastActions = actionHistory.slice(-4);
-                    const allWaitsOrScrolls = lastActions.every(a => 
-                        a.action === 'wait' || 
+                    const allWaitsOrScrolls = lastActions.every(a =>
+                        a.action === 'wait' ||
                         a.action === 'scroll' ||
                         (a.action === 'click' && a.reason?.toLowerCase().includes('scroll'))
                     );
@@ -581,14 +604,19 @@ export class WebAgent {
                     }
                 }
 
-                // Detectar si estamos atascados (dos métodos: por snapshot hash y por falta de progreso)
+                // Detectar si estamos atascados (tres métodos: por snapshot hash, por falta de progreso, y por loop de snapshots)
                 const stuckByHash = this.stateManager.isStuck();
                 const stuckByProgress = this.stateManager.isStuckByLackOfProgress();
-                
-                if (stuckByHash || stuckByProgress) {
-                    const stuckReason = stuckByHash ? 'snapshot hash no cambia' : 'sin acciones exitosas recientes';
+                const stuckBySnapshotLoop = this.snapshotExtractor.isInSnapshotLoop(3);
+
+                if (stuckByHash || stuckByProgress || stuckBySnapshotLoop) {
+                    const reasons = [];
+                    if (stuckByHash) reasons.push('snapshot hash no cambia');
+                    if (stuckByProgress) reasons.push('sin acciones exitosas recientes');
+                    if (stuckBySnapshotLoop) reasons.push('loop de snapshots idénticos');
+                    const stuckReason = reasons.join(', ');
                     console.log(`⚠️ Detectado estado atascado (${stuckReason}), aplicando recuperación...`);
-                    
+
                     const shouldContinueRecovery = this.stateManager.recordRecoveryAttempt();
                     if (shouldContinueRecovery) {
                         await this.applyRecoveryStrategies();
@@ -597,11 +625,17 @@ export class WebAgent {
                     // Si agotamos intentos de recuperación, continuamos al LLM para nueva estrategia
                 }
 
+                // Ignorar loading si es probablemente un falso positivo (loader decorativo)
+                if (snapshot.pageState.loadingState?.likelyFalsePositive && snapshot.pageState.loadingState.isLoading) {
+                    console.log(`   ⚠️ Loading detectado pero probablemente decorativo (${snapshot.pageState.loadingState.consecutiveLoadingCount} snapshots seguidos). Ignorando.`);
+                    // No hacer wait innecesario
+                }
+
                 // Detectar clicks repetidos al mismo elemento (limitar a 2 intentos)
                 const lastActions = this.stateManager.getState().executedActions.slice(-3);
-                const repeatedClick = lastActions.filter(a => 
-                    a.action === 'click' && 
-                    a.target === lastActions[0]?.target && 
+                const repeatedClick = lastActions.filter(a =>
+                    a.action === 'click' &&
+                    a.target === lastActions[0]?.target &&
                     !a.success &&
                     lastActions[0]?.target !== undefined
                 );
@@ -647,8 +681,8 @@ export class WebAgent {
                 // Early exit: Si hay errores repetidos (ej: "No hay fechas disponibles" varias veces)
                 if (loginCompleted) {
                     const extractedInfo = this.stateManager.getExtractedInfo();
-                    const errorInfoCount = extractedInfo.filter(i => 
-                        i.type === 'error' || 
+                    const errorInfoCount = extractedInfo.filter(i =>
+                        i.type === 'error' ||
                         /no hay|no disponible|not available|sin.*disponible/i.test(i.content)
                     ).length;
                     if (errorInfoCount >= 2) {
@@ -768,17 +802,17 @@ export class WebAgent {
                         snapshotHash: this.snapshotExtractor.getSnapshotHash(snapshot)
                     });
                 }
-                
+
                 // Actualizar heartbeat si hubo progreso real (acción exitosa o cambio de paso)
                 const currentStepAfter = this.stateManager.getState().currentStep;
                 const hasSuccessfulAction = batchResult.results.some(r => r.success);
                 const stepChanged = currentStepAfter > currentStepBefore;
-                
+
                 if (hasSuccessfulAction || stepChanged) {
                     this.lastProgressTimestamp = Date.now();
                     this.lastStepCount = currentStepAfter;
                 }
-                
+
                 // Verificar cancelación después de cada batch
                 if (this.isCancelled()) {
                     console.log('⚠️ Agente cancelado. Terminando ejecución.');
@@ -853,7 +887,7 @@ export class WebAgent {
         const detector = this.siteAdapter?.getPaymentDetector();
         if (!detector) return false;
         const url = this.page!.url();
-        if (detector.urlPatterns.some(p => p.test(url))) return true;
+        if (detector.urlPatterns.some((p: RegExp) => p.test(url))) return true;
         for (const selector of detector.indicators) {
             try {
                 const found = await this.page!.locator(selector).count();
@@ -864,15 +898,61 @@ export class WebAgent {
     }
 
     private async applyRecoveryStrategies(): Promise<void> {
+        // Verificar si la página está cerrada antes de aplicar estrategias
+        if (!this.page || this.page.isClosed()) {
+            return;
+        }
+
         const strategies = this.stateManager.getRecoveryStrategies();
-        for (const strategy of strategies.slice(0, 2)) {
-            console.log(`   🔧 Aplicando: ${strategy}`);
-            switch (strategy) {
-                case 'scroll_down': await this.page!.evaluate(() => window.scrollBy(0, 300)); break;
-                case 'close_modal': await this.page!.keyboard.press('Escape'); break;
-                case 'refresh_page': await this.page!.reload(); break;
+        for (const strategy of strategies.slice(0, 3)) {
+            // Verificar nuevamente antes de cada estrategia
+            if (!this.page || this.page.isClosed()) {
+                return;
             }
-            await this.page!.waitForTimeout(500);
+
+            try {
+                console.log(`   🔧 Aplicando: ${strategy}`);
+                switch (strategy) {
+                    case 'scroll_down':
+                        await this.page.evaluate(() => window.scrollBy(0, 300)).catch(() => { });
+                        break;
+                    case 'close_modal':
+                        await this.page.keyboard.press('Escape').catch(() => { });
+                        break;
+                    case 'click_outside':
+                        // Intentar click en esquina superior izquierda para cerrar modales
+                        await this.page.mouse.click(10, 10).catch(() => { });
+                        // Y también en el centro-arriba por si acaso
+                        await this.page.mouse.click(window.innerWidth / 2, 50).catch(() => { });
+                        break;
+                    case 'refresh_page':
+                        await this.page.reload().catch(() => { });
+                        break;
+                }
+
+                // Espera segura que no lanza error si la página está cerrada
+                try {
+                    await this.page.waitForTimeout(500);
+                } catch (e: any) {
+                    const errorMessage = e?.message || '';
+                    if (errorMessage.includes('Target page, context or browser has been closed') ||
+                        errorMessage.includes('Target closed') ||
+                        errorMessage.includes('Browser closed') ||
+                        errorMessage.includes('context was destroyed')) {
+                        return;
+                    }
+                    throw e;
+                }
+            } catch (e: any) {
+                const errorMessage = e?.message || '';
+                if (errorMessage.includes('Target page, context or browser has been closed') ||
+                    errorMessage.includes('Target closed') ||
+                    errorMessage.includes('Browser closed') ||
+                    errorMessage.includes('context was destroyed')) {
+                    return;
+                }
+                // Continuar con la siguiente estrategia si hay otro tipo de error
+            }
         }
     }
 
@@ -941,7 +1021,7 @@ export class WebAgent {
             } catch (e: any) {
                 const errorMsg = (e as Error).message || '';
                 // Ignorar errores de contexto cerrado (normal en modo paralelo)
-                if (!errorMsg.includes('Target closed') && 
+                if (!errorMsg.includes('Target closed') &&
                     !errorMsg.includes('Browser closed') &&
                     !errorMsg.includes('context was destroyed') &&
                     !errorMsg.includes('Target page, context or browser has been closed')) {
@@ -950,7 +1030,7 @@ export class WebAgent {
             }
             this.sessionPathForSave = null;
         }
-        
+
         // Cerrar página siempre para liberar memoria (especialmente importante en modo paralelo)
         // Pero solo si el contexto aún está abierto (en modo paralelo, el contexto se cierra externamente)
         if (this.page && !this.config.optimizeForParallel) {
@@ -959,7 +1039,7 @@ export class WebAgent {
             } catch (e: any) {
                 // Ignorar errores de página ya cerrada
                 const errorMsg = e.message || '';
-                if (!errorMsg.includes('Target closed') && 
+                if (!errorMsg.includes('Target closed') &&
                     !errorMsg.includes('Browser closed') &&
                     !errorMsg.includes('Target page, context or browser has been closed')) {
                     console.warn('⚠️ Error al cerrar página:', errorMsg);
@@ -970,32 +1050,32 @@ export class WebAgent {
             // En modo paralelo, solo limpiar referencia
             this.page = null;
         }
-        
+
         // Solo cerrar browser si es nuestro propio browser (no compartido)
         if (this.browser && !this.config.optimizeForParallel) {
             try {
                 await this.browser.close();
             } catch (e: any) {
                 const errorMsg = e.message || '';
-                if (!errorMsg.includes('Target closed') && 
+                if (!errorMsg.includes('Target closed') &&
                     !errorMsg.includes('Browser closed')) {
                     console.warn('⚠️ Error al cerrar browser:', errorMsg);
                 }
             }
             this.browser = null;
         }
-        
+
         // Limpiar referencias para ayudar al GC
         if (this.config.optimizeForParallel) {
             this.capturedApiData = [];
             // No cerrar contexto en modo paralelo - se cierra externamente por runSingleAgent
             this.context = null;
         }
-        
+
         // Limpiar siempre capturedApiData para evitar memory leaks
         this.capturedApiData = [];
         this.abortController = null;
-        
+
         // Detener health checks
         this.stopBrowserHealthChecks();
     }

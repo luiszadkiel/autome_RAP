@@ -34,7 +34,7 @@ export class SnapshotFormatter {
             formattedElements,
             modal: snapshot.pageState.modalInfo || null, // Map from internal structure
             errors: snapshot.pageState.errorMessages,
-            isLoading: snapshot.pageState.isLoading,
+            isLoading: snapshot.pageState.loadingState?.isLoading ?? snapshot.pageState.isLoading,
             forms: grouped.forms,
             rawElements: snapshot.elements
         };

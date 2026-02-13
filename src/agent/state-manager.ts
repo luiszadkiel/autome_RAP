@@ -112,30 +112,30 @@ export class StateManager {
     isStuck(): boolean {
         return this.state.stuckDetectionCounter >= this.STUCK_THRESHOLD;
     }
-    
+
     /**
      * Verifica si el agente está atascado basado en falta de acciones exitosas
      * Más robusto para SPAs donde el DOM cambia pero no hay progreso real
      */
     isStuckByLackOfProgress(): boolean {
         if (this.state.currentStep < 5) return false; // Necesitamos al menos 5 pasos para detectar
-        
+
         const recentActions = this.state.executedActions.slice(-5);
-        
+
         // Si en los últimos 5 pasos no hubo ninguna acción exitosa, está atascado
         const hasSuccessfulAction = recentActions.some(a => a.success);
         if (!hasSuccessfulAction) {
             return true;
         }
-        
+
         // Si solo hay waits y scrolls sin éxito, está atascado
-        const onlyWaitsAndScrolls = recentActions.every(a => 
+        const onlyWaitsAndScrolls = recentActions.every(a =>
             (a.action === 'wait' || a.action === 'scroll') && !a.success
         );
         if (onlyWaitsAndScrolls && recentActions.length >= 4) {
             return true;
         }
-        
+
         return false;
     }
 
@@ -158,7 +158,7 @@ export class StateManager {
     recordRecoveryAttempt(): boolean {
         this.state.recoveryAttempts++;
         const MAX_RECOVERY_ATTEMPTS = 3;
-        
+
         if (this.state.recoveryAttempts >= MAX_RECOVERY_ATTEMPTS) {
             console.log(`   ⚠️ Máximo de ${MAX_RECOVERY_ATTEMPTS} intentos de recuperación alcanzado, forzando nueva estrategia...`);
             this.resetStuckState();
@@ -200,6 +200,7 @@ export class StateManager {
         // Estrategias generales
         strategies.push('scroll_down'); // Revelar más contenido
         strategies.push('close_modal'); // Cerrar cualquier modal abierto
+        strategies.push('click_outside'); // Intentar cerrar modal por click en esquina
         strategies.push('refresh_page'); // Último recurso
 
         return strategies;
@@ -294,7 +295,7 @@ export class StateManager {
         // Deduplicar en tiempo real: normalizar contenido para comparación
         const normalizedContent = (info.content || '').trim().toLowerCase();
         const key = `${info.type || 'unknown'}:${normalizedContent}`;
-        
+
         // Verificar si ya existe información duplicada
         const isDuplicate = this.state.extractedInfo.some(
             existing => {
@@ -303,7 +304,7 @@ export class StateManager {
                 return existingKey === key;
             }
         );
-        
+
         if (!isDuplicate) {
             this.state.extractedInfo.push({
                 ...info,
@@ -370,7 +371,7 @@ export class StateManager {
         if (extractedInfo.length > 0) {
             const hasRelevantInfo = extractedInfo.some(info => {
                 const contentLower = info.content.toLowerCase();
-                return objectiveLower.split(' ').some(word => 
+                return objectiveLower.split(' ').some(word =>
                     word.length > 3 && contentLower.includes(word.toLowerCase())
                 );
             });

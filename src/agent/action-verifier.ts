@@ -69,17 +69,33 @@ export class ActionVerifier {
      * Captura el estado ANTES de ejecutar una acción
      */
     async capturePreActionState(page: Page, context: ActionContext): Promise<PreActionState> {
-        const [fingerprint, targetState] = await Promise.all([
-            this.getPageFingerprint(page),
-            context.targetRef ? this.getElementState(page, context.targetRef) : null
-        ]);
+        // Verificar si la página está cerrada antes de capturar el estado
+        if (page.isClosed()) {
+            throw new Error('Target page, context or browser has been closed');
+        }
 
-        return {
-            url: page.url(),
-            fingerprint,
-            targetState,
-            timestamp: Date.now()
-        };
+        try {
+            const [fingerprint, targetState] = await Promise.all([
+                this.getPageFingerprint(page),
+                context.targetRef ? this.getElementState(page, context.targetRef) : null
+            ]);
+
+            return {
+                url: page.url(),
+                fingerprint,
+                targetState,
+                timestamp: Date.now()
+            };
+        } catch (e: any) {
+            const errorMessage = e?.message || '';
+            if (errorMessage.includes('Target page, context or browser has been closed') ||
+                errorMessage.includes('Target closed') ||
+                errorMessage.includes('Browser closed') ||
+                errorMessage.includes('context was destroyed')) {
+                throw new Error('Target page, context or browser has been closed');
+            }
+            throw e;
+        }
     }
 
     /**
@@ -90,46 +106,86 @@ export class ActionVerifier {
         context: ActionContext,
         preState: PreActionState
     ): Promise<VerificationResult> {
-        // 1. Esperar estabilidad (máximo 3 segundos, 5s en login)
-        const isLoginCtx = this.isLoginPage(preState.url);
-        await this.waitForStability(page, 3000, isLoginCtx);
+        try {
+            // 1. Esperar estabilidad (máximo 3 segundos, 5s en login)
+            const isLoginCtx = this.isLoginPage(preState.url);
+            await this.waitForStability(page, 3000, isLoginCtx);
 
-        const evidence = {
-            domChanged: false,
-            urlChanged: false,
-            newElementsAppeared: false,
-            targetElementChanged: false,
-            errorsDetected: [] as string[],
-            loadingComplete: true,
-            networkIdle: true
-        };
+            const evidence = {
+                domChanged: false,
+                urlChanged: false,
+                newElementsAppeared: false,
+                targetElementChanged: false,
+                errorsDetected: [] as string[],
+                loadingComplete: true,
+                networkIdle: true
+            };
 
-        // 2. Verificar cambio de URL
-        const currentUrl = page.url();
-        evidence.urlChanged = currentUrl !== preState.url;
+            // 2. Verificar cambio de URL
+            let currentUrl = preState.url;
+            try {
+                if (page.isClosed()) {
+                    throw new Error('Target page, context or browser has been closed');
+                }
+                currentUrl = page.url();
+            } catch (e: any) {
+                const errorMessage = e?.message || '';
+                if (errorMessage.includes('Target page, context or browser has been closed') ||
+                    errorMessage.includes('Target closed') ||
+                    errorMessage.includes('Browser closed') ||
+                    errorMessage.includes('context was destroyed')) {
+                    throw new Error('Target page, context or browser has been closed');
+                }
+                // Si falla obtener la URL por otra razón, mantenemos la anterior
+            }
+            evidence.urlChanged = currentUrl !== preState.url;
 
-        // 3. Verificar cambios en DOM
-        const currentFingerprint = await this.getPageFingerprint(page);
-        evidence.domChanged = !this.fingerprintsEqual(preState.fingerprint, currentFingerprint);
-        evidence.newElementsAppeared = currentFingerprint.elementCount > preState.fingerprint.elementCount;
+            // 3. Verificar cambios en DOM
+            const currentFingerprint = await this.getPageFingerprint(page).catch(() => preState.fingerprint);
+            evidence.domChanged = !this.fingerprintsEqual(preState.fingerprint, currentFingerprint);
+            evidence.newElementsAppeared = currentFingerprint.elementCount > preState.fingerprint.elementCount;
 
-        // 4. Verificar cambio en elemento objetivo
-        if (context.targetRef && preState.targetState) {
-            const currentTargetState = await this.getElementState(page, context.targetRef);
-            evidence.targetElementChanged = !this.elementStatesEqual(preState.targetState, currentTargetState);
+            // 4. Verificar cambio en elemento objetivo
+            if (context.targetRef && preState.targetState) {
+                try {
+                    const currentTargetState = await this.getElementState(page, context.targetRef);
+                    evidence.targetElementChanged = !this.elementStatesEqual(preState.targetState, currentTargetState);
+                } catch {
+                    // Elemento puede no existir si el contexto está cerrado
+                }
+            }
+
+            // 5. Detectar errores en la página
+            evidence.errorsDetected = await this.detectPageErrors(page).catch(() => []);
+
+            // 6. Verificar loading completado
+            evidence.loadingComplete = await this.isLoadingComplete(page).catch(() => true);
+
+            // 7. Verificar network idle
+            evidence.networkIdle = await this.isNetworkIdle(page).catch(() => true);
+
+            // 8. Calcular resultado
+            return this.calculateVerificationResult(context, evidence, preState);
+        } catch (error: any) {
+            // Si el contexto está cerrado durante la verificación, retornar resultado de fallo
+            const errorMessage = error.message || '';
+            if (errorMessage.includes('Target page, context or browser has been closed') ||
+                errorMessage.includes('Target closed') ||
+                errorMessage.includes('Browser closed') ||
+                errorMessage.includes('context was destroyed')) {
+                // Retornar resultado que indica que el contexto está cerrado
+                return {
+                    success: false,
+                    confidence: 0,
+                    reason: 'Context closed during verification',
+                    shouldRetry: false,
+                    evidence: {} as any,
+                    suggestedAction: undefined
+                };
+            }
+            // Re-lanzar otros errores
+            throw error;
         }
-
-        // 5. Detectar errores en la página
-        evidence.errorsDetected = await this.detectPageErrors(page);
-
-        // 6. Verificar loading completado
-        evidence.loadingComplete = await this.isLoadingComplete(page);
-
-        // 7. Verificar network idle
-        evidence.networkIdle = await this.isNetworkIdle(page);
-
-        // 8. Calcular resultado
-        return this.calculateVerificationResult(context, evidence, preState);
     }
 
     /**
@@ -142,25 +198,56 @@ export class ActionVerifier {
         let stableCount = 0;
 
         while (Date.now() - startTime < effectiveMaxWait && stableCount < 3) {
-            // Esperar un poco
-            await page.waitForTimeout(150);
-
-            // Verificar si el DOM cambió
-            const currentLength = await page.evaluate(() => document.body.innerHTML.length);
-
-            if (Math.abs(currentLength - lastHtmlLength) < 50) {
-                stableCount++;
-            } else {
-                stableCount = 0;
-                lastHtmlLength = currentLength;
+            // Verificar si la página está cerrada antes de continuar
+            if (page.isClosed()) {
+                throw new Error('Target page, context or browser has been closed');
             }
 
-            // También verificar si hay requests pendientes
             try {
-                await page.waitForLoadState('networkidle', { timeout: 500 });
-                break;
-            } catch {
-                // Continuar esperando
+                // Esperar un poco
+                try {
+                    await page.waitForTimeout(150);
+                } catch (e: any) {
+                    const errorMessage = e?.message || '';
+                    if (errorMessage.includes('Target page, context or browser has been closed') ||
+                        errorMessage.includes('Target closed') ||
+                        errorMessage.includes('Browser closed') ||
+                        errorMessage.includes('context was destroyed')) {
+                        throw new Error('Target page, context or browser has been closed');
+                    }
+                    // Continuar si es otro tipo de error
+                }
+
+                // Verificar si el DOM cambió
+                const currentLength = await page.evaluate(() => document.body.innerHTML.length).catch(() => {
+                    // Si el contexto está cerrado, lanzar error específico
+                    throw new Error('Target page, context or browser has been closed');
+                });
+
+                if (Math.abs(currentLength - lastHtmlLength) < 50) {
+                    stableCount++;
+                } else {
+                    stableCount = 0;
+                    lastHtmlLength = currentLength;
+                }
+
+                // También verificar si hay requests pendientes
+                try {
+                    await page.waitForLoadState('networkidle', { timeout: 500 });
+                    break;
+                } catch {
+                    // Continuar esperando
+                }
+            } catch (error: any) {
+                // Si el contexto está cerrado, propagar el error
+                const errorMessage = error.message || '';
+                if (errorMessage.includes('Target page, context or browser has been closed') ||
+                    errorMessage.includes('Target closed') ||
+                    errorMessage.includes('Browser closed') ||
+                    errorMessage.includes('context was destroyed')) {
+                    throw error;
+                }
+                // Para otros errores, continuar esperando
             }
         }
     }
@@ -169,82 +256,141 @@ export class ActionVerifier {
      * Obtiene una "huella digital" de la página para comparación rápida
      */
     private async getPageFingerprint(page: Page): Promise<PageFingerprint> {
-        return page.evaluate(() => {
-            const interactiveElements = document.querySelectorAll(
-                'button, input, select, a[href], [role="button"], [onclick]'
-            );
+        // Verificar si la página está cerrada antes de evaluar
+        if (page.isClosed()) {
+            throw new Error('Target page, context or browser has been closed');
+        }
 
-            // Crear hash de elementos visibles
-            const visibleElements: string[] = [];
-            interactiveElements.forEach((el, idx) => {
-                if (el instanceof HTMLElement && el.offsetParent !== null) {
-                    visibleElements.push(`${el.tagName}:${el.textContent?.slice(0, 20) || idx}`);
+        try {
+            return await page.evaluate(() => {
+                // Verificar si el contexto está cerrado
+                if (!document.body) {
+                    throw new Error('Target page, context or browser has been closed');
                 }
+                const interactiveElements = document.querySelectorAll(
+                    'button, input, select, a[href], [role="button"], [onclick]'
+                );
+
+                // Crear hash de elementos visibles
+                const visibleElements: string[] = [];
+                interactiveElements.forEach((el, idx) => {
+                    if (el instanceof HTMLElement && el.offsetParent !== null) {
+                        visibleElements.push(`${el.tagName}:${el.textContent?.slice(0, 20) || idx}`);
+                    }
+                });
+
+                // Detectar modales/overlays
+                const hasModal = !!document.querySelector(
+                    '[role="dialog"], [role="alertdialog"], .modal.show, [aria-modal="true"]'
+                );
+
+                // Detectar formularios activos
+                const activeFormInputs = document.querySelectorAll('input:focus, select:focus, textarea:focus').length;
+
+                return {
+                    url: window.location.href,
+                    title: document.title,
+                    elementCount: interactiveElements.length,
+                    visibleElementsHash: visibleElements.slice(0, 20).join('|'),
+                    hasModal,
+                    activeFormInputs,
+                    bodyLength: document.body.innerHTML.length
+                };
             });
-
-            // Detectar modales/overlays
-            const hasModal = !!document.querySelector(
-                '[role="dialog"], [role="alertdialog"], .modal.show, [aria-modal="true"]'
-            );
-
-            // Detectar formularios activos
-            const activeFormInputs = document.querySelectorAll('input:focus, select:focus, textarea:focus').length;
-
+        } catch (e: any) {
+            const errorMessage = e?.message || '';
+            if (errorMessage.includes('Target page, context or browser has been closed') ||
+                errorMessage.includes('Target closed') ||
+                errorMessage.includes('Browser closed') ||
+                errorMessage.includes('context was destroyed')) {
+                // Lanzar el error para que se propague correctamente
+                throw new Error('Target page, context or browser has been closed');
+            }
+            // Si falla por otra razón, retornar fingerprint básico
             return {
-                url: window.location.href,
-                title: document.title,
-                elementCount: interactiveElements.length,
-                visibleElementsHash: visibleElements.slice(0, 20).join('|'),
-                hasModal,
-                activeFormInputs,
-                bodyLength: document.body.innerHTML.length
+                url: '',
+                title: '',
+                elementCount: 0,
+                visibleElementsHash: '',
+                hasModal: false,
+                activeFormInputs: 0,
+                bodyLength: 0
             };
-        });
+        }
     }
 
     /**
      * Obtiene el estado de un elemento específico
      */
     private async getElementState(page: Page, ref: string): Promise<ElementState | null> {
-        return page.evaluate((ref) => {
-            // Buscar por data-ref o por índice
-            let element: HTMLElement | null = null;
+        // Verificar si la página está cerrada antes de evaluar
+        if (page.isClosed()) {
+            throw new Error('Target page, context or browser has been closed');
+        }
 
-            if (ref.startsWith('e') && !isNaN(parseInt(ref.slice(1)))) {
-                const index = parseInt(ref.replace('e', '')) - 1;
-                const elements = document.querySelectorAll('button, input, select, a');
-                if (index >= 0 && index < elements.length) {
-                    element = elements[index] as HTMLElement;
+        try {
+            return await page.evaluate((ref) => {
+                // Verificar si el contexto está cerrado
+                if (!document.body) {
+                    throw new Error('Target page, context or browser has been closed');
                 }
+                // Buscar por data-ref o por índice
+                let element: HTMLElement | null = null;
+
+                if (ref.startsWith('e') && !isNaN(parseInt(ref.slice(1)))) {
+                    const index = parseInt(ref.replace('e', '')) - 1;
+                    const elements = document.querySelectorAll('button, input, select, a');
+                    if (index >= 0 && index < elements.length) {
+                        element = elements[index] as HTMLElement;
+                    }
+                }
+
+                if (!element) {
+                    element = document.querySelector(`[data-ref="${ref}"]`) as HTMLElement;
+                }
+
+                if (!element || !(element instanceof HTMLElement)) return null;
+
+                const rect = element.getBoundingClientRect();
+
+                return {
+                    exists: true,
+                    visible: element.offsetParent !== null,
+                    enabled: !(element as HTMLButtonElement).disabled,
+                    text: element.textContent?.slice(0, 50) || '',
+                    value: (element as HTMLInputElement).value || '',
+                    checked: (element as HTMLInputElement).checked,
+                    selected: (element as HTMLSelectElement).selectedIndex,
+                    position: { x: rect.x, y: rect.y },
+                    classes: element.className
+                };
+            }, ref);
+        } catch (error: any) {
+            const errorMessage = error.message || '';
+            if (errorMessage.includes('Target page, context or browser has been closed') ||
+                errorMessage.includes('Target closed') ||
+                errorMessage.includes('Browser closed') ||
+                errorMessage.includes('context was destroyed')) {
+                return null;
             }
-
-            if (!element) {
-                element = document.querySelector(`[data-ref="${ref}"]`) as HTMLElement;
-            }
-
-            if (!element || !(element instanceof HTMLElement)) return null;
-
-            const rect = element.getBoundingClientRect();
-
-            return {
-                exists: true,
-                visible: element.offsetParent !== null,
-                enabled: !(element as HTMLButtonElement).disabled,
-                text: element.textContent?.slice(0, 50) || '',
-                value: (element as HTMLInputElement).value || '',
-                checked: (element as HTMLInputElement).checked,
-                selected: (element as HTMLSelectElement).selectedIndex,
-                position: { x: rect.x, y: rect.y },
-                classes: element.className
-            };
-        }, ref);
+            throw error;
+        }
     }
 
     /**
      * Detecta mensajes de error en la página
      */
     private async detectPageErrors(page: Page): Promise<string[]> {
+        // Verificar si la página está cerrada antes de evaluar
+        if (page.isClosed()) {
+            throw new Error('Target page, context or browser has been closed');
+        }
+
         return page.evaluate(() => {
+            // Verificar si el contexto está cerrado
+            if (!document.body) {
+                throw new Error('Target page, context or browser has been closed');
+            }
             const errors: string[] = [];
 
             // Selectores de errores comunes
@@ -279,7 +425,16 @@ export class ActionVerifier {
      * Verifica si la página terminó de cargar
      */
     private async isLoadingComplete(page: Page): Promise<boolean> {
+        // Verificar si la página está cerrada antes de evaluar
+        if (page.isClosed()) {
+            throw new Error('Target page, context or browser has been closed');
+        }
+
         return page.evaluate(() => {
+            // Verificar si el contexto está cerrado
+            if (!document.body) {
+                throw new Error('Target page, context or browser has been closed');
+            }
             // Verificar spinners/loaders
             const loadingIndicators = document.querySelectorAll(
                 '.loading, .spinner, .loader, [class*="loading"], [class*="spinner"],' +
@@ -308,10 +463,33 @@ export class ActionVerifier {
      * Verifica si hay requests de red pendientes
      */
     private async isNetworkIdle(page: Page): Promise<boolean> {
+        // Verificar si la página aún existe antes de hacer la verificación
+        try {
+            await page.url(); // Verificación rápida de que la página existe
+        } catch (error: any) {
+            const errorMessage = error.message || '';
+            if (errorMessage.includes('Target page, context or browser has been closed') ||
+                errorMessage.includes('Target closed') ||
+                errorMessage.includes('Browser closed') ||
+                errorMessage.includes('context was destroyed')) {
+                throw new Error('Target page, context or browser has been closed');
+            }
+            // Para otros errores, asumir que está idle
+            return true;
+        }
         try {
             await page.waitForLoadState('networkidle', { timeout: 1000 });
             return true;
-        } catch {
+        } catch (error: any) {
+            // Si el error es de contexto cerrado, propagarlo
+            const errorMessage = error.message || '';
+            if (errorMessage.includes('Target page, context or browser has been closed') ||
+                errorMessage.includes('Target closed') ||
+                errorMessage.includes('Browser closed') ||
+                errorMessage.includes('context was destroyed')) {
+                throw error;
+            }
+            // Para otros errores (timeout, etc.), asumir que no está idle
             return false;
         }
     }

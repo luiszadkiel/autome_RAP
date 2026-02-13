@@ -542,8 +542,15 @@ ${objective}
     prompt += '\n';
   }
 
-  if (snapshotRaw.pageState.isLoading) {
-    prompt += `⏳ PÁGINA CARGANDO - considera usar "wait"\n\n`;
+  // Usar LoadingState detallado si está disponible, sino usar el booleano legacy
+  const loadingState = snapshotRaw.pageState.loadingState || { isLoading: snapshotRaw.pageState.isLoading };
+  if (loadingState.isLoading) {
+    if (loadingState.likelyFalsePositive) {
+      prompt += `⏳ PÁGINA CARGANDO (probablemente decorativo - ${loadingState.consecutiveLoadingCount} snapshots seguidos) - puedes ignorar y continuar\n\n`;
+    } else {
+      const loadingType = loadingState.loadingType ? ` (tipo: ${loadingState.loadingType})` : '';
+      prompt += `⏳ PÁGINA CARGANDO${loadingType} - considera usar "wait"\n\n`;
+    }
   }
 
   // Advertencia cuando hay pocos elementos (warm-up fallido)
@@ -556,8 +563,32 @@ ${objective}
 `;
   }
 
+  // Mostrar PageContext si está disponible (campos requeridos vacíos, wizard, etc.)
+  if (snapshotRaw.pageContext) {
+    const ctx = snapshotRaw.pageContext;
+    if (ctx.emptyRequiredFields && ctx.emptyRequiredFields.length > 0) {
+      prompt += `\n## ⚠️ CAMPOS REQUERIDOS SIN LLENAR:\n`;
+      ctx.emptyRequiredFields.forEach(field => prompt += `   - ${field}\n`);
+      prompt += `DEBES LLENAR ESTOS CAMPOS ANTES DE CONTINUAR\n\n`;
+    }
+    if (ctx.isWizard) {
+      prompt += `\n## 📋 WIZARD/PASOS DETECTADO\n`;
+      if (ctx.wizardStep && ctx.wizardTotalSteps) {
+        prompt += `   Paso ${ctx.wizardStep} de ${ctx.wizardTotalSteps}\n`;
+      }
+      prompt += `   Completa el paso actual antes de avanzar\n\n`;
+    }
+    if (ctx.hasCalendar && ctx.calendarOpen) {
+      prompt += `\n## 📅 CALENDARIO ABIERTO\n`;
+      if (structuredData.date) {
+        prompt += `   Fecha objetivo: ${structuredData.date.formatted}\n`;
+      }
+      prompt += `   Selecciona la fecha en el calendario\n\n`;
+    }
+  }
+  
   // Reforzar contexto de fecha cuando hay calendario abierto
-  const hasCalendar = snapshotRaw.elements.some(e => 
+  const hasCalendar = snapshotRaw.pageContext?.hasCalendar || snapshotRaw.elements.some(e => 
     e.name?.toLowerCase().includes('calendario') ||
     e.role === 'grid' ||
     (e.name && /^\d{1,2}$/.test(e.name.trim())) ||

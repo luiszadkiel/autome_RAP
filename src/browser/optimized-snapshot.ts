@@ -65,6 +65,42 @@ export interface FrameworkInfo {
     serverRendered?: boolean;
 }
 
+/** Estado de carga detallado (reemplaza el booleano isLoading) */
+export interface LoadingState {
+    isLoading: boolean;
+    loadingType?: 'spinner' | 'skeleton' | 'progress-bar' | 'overlay' | 'text';
+    consecutiveLoadingCount: number;
+    loadingSince?: number; // timestamp cuando empezó a cargar
+    likelyFalsePositive: boolean; // true si lleva mucho tiempo cargando (probablemente decorativo)
+    loaderSelectors?: string[]; // selectores que detectaron el loading
+}
+
+/** Contexto semántico de la página */
+export interface PageContext {
+    isWizard?: boolean;
+    wizardStep?: number;
+    wizardTotalSteps?: number;
+    hasTabs?: boolean;
+    activeTab?: string;
+    hasCalendar?: boolean;
+    calendarOpen?: boolean;
+    emptyRequiredFields?: string[]; // IDs o nombres de campos requeridos sin llenar
+    hasForm?: boolean;
+    formFields?: { name: string; type: string; required: boolean; filled: boolean }[];
+}
+
+/** Perfil de configuración por sitio */
+export interface SiteProfile {
+    domain: string | RegExp;
+    extraSelectors?: string[]; // selectores adicionales para este sitio
+    loadingSelectors?: string[]; // selectores específicos de loading
+    falsePositiveLoaders?: string[]; // selectores que parecen loaders pero no lo son
+    blockingOverlays?: string[]; // selectores de overlays que bloquean interacción
+    domStableTimeout?: number; // timeout personalizado para waitForDomStable
+    maxWaitForElements?: number; // tiempo máximo para esperar elementos
+    dismissOverlaysBeforeExtract?: boolean; // si debe cerrar overlays automáticamente
+}
+
 export interface OptimizedSnapshot {
     url: string;
     title: string;
@@ -74,11 +110,13 @@ export interface OptimizedSnapshot {
     pageState: {
         hasModal: boolean;
         modalInfo?: { title: string; buttons: string[] };
-        isLoading: boolean;
+        isLoading: boolean; // DEPRECATED: usar loadingState en su lugar
+        loadingState: LoadingState; // Nuevo: estado de carga detallado
         hasErrors: boolean;
         errorMessages: string[];
         currentForm?: { action: string; method: string; };
     };
+    pageContext?: PageContext; // Nuevo: contexto semántico de la página
     /** Respuestas API/XHR capturadas (si está habilitada la interceptación) */
     capturedApiData?: { url: string; data: unknown }[];
     /** Contenido extraído con Readability/tablas/precios (modo extracción) */
@@ -87,16 +125,222 @@ export interface OptimizedSnapshot {
         timestamp: number;
         elementCount: number;
         extractionTimeMs: number;
+        snapshotHash?: string; // hash del snapshot para detectar loops
     };
 }
 
+/** Perfiles de configuración por sitio */
+const SITE_PROFILES: SiteProfile[] = [
+    {
+        domain: /pgaoceans4\.com/i,
+        extraSelectors: [
+            '[data-toggle-class]',
+            '[class*="js-booking"]',
+            '[class*="booking-component"]',
+            '[id*="searchForm"]',
+            '[id*="booking"]'
+        ],
+        loadingSelectors: [
+            '.c-loading-f',
+            '[id*="loading"]',
+            '[class*="loading"]'
+        ],
+        falsePositiveLoaders: [
+            '.c-loading-f__wave', // decorativo, no es loader real
+            '[class*="wave"]' // elementos decorativos de onda
+        ],
+        blockingOverlays: [
+            '[data-overlay]',
+            '.c-overlay',
+            '[class*="popup-msg"]'
+        ],
+        domStableTimeout: 8000, // SPAs pesadas necesitan más tiempo
+        maxWaitForElements: 15000,
+        dismissOverlaysBeforeExtract: true
+    },
+    {
+        domain: /outlook\.(com|office\.com)|bookings\.office\.com/i,
+        extraSelectors: [
+            '[data-automation-id]',
+            '.ms-Button',
+            '[class*="ms-"]',
+            '[role="button"][class*="Button"]',
+            // Elementos dentro de #app cuando Bookings está cargado
+            '#app button',
+            '#app input',
+            '#app select',
+            '#app textarea',
+            '#app [role="button"]',
+            '#app [role="option"]',
+            '#app [class*="service"]',
+            '#app [class*="Reservar"]',
+            '#app [class*="calendar"]',
+            '#app [class*="day"]',
+            '#app [class*="time"]',
+            '#app [class*="slot"]',
+            '#app [class*="field"]',
+            '#app [class*="input"]',
+            '#app [class*="form"]'
+        ],
+        loadingSelectors: [
+            '#loadingScreen',
+            '#loadingSpinner',
+            '[data-automation-id*="loading"]',
+            '.ms-Spinner',
+            '[class*="Spinner"]',
+            '[id*="loading"]'
+        ],
+        falsePositiveLoaders: [
+            '#bookingsLogo', // Logo no es loader
+            '#MSLogo' // Logo de Microsoft no es loader
+        ],
+        blockingOverlays: [
+            '[role="dialog"]',
+            '.ms-Modal',
+            '[class*="Modal"]',
+            '#loadingScreen' // Pantalla de carga bloquea interacción
+        ],
+        domStableTimeout: 8000, // Outlook Bookings es una SPA pesada que necesita más tiempo
+        maxWaitForElements: 15000, // Más tiempo para que React cargue completamente
+        dismissOverlaysBeforeExtract: true
+    },
+    {
+        domain: /cayacoagolf|countryclub/i,
+        extraSelectors: [
+            '[class*="calendar"]',
+            '[class*="day"]',
+            '[class*="time-slot"]',
+            '[class*="tee"]'
+        ],
+        loadingSelectors: [
+            '.loading',
+            '[class*="loading"]'
+        ],
+        falsePositiveLoaders: [],
+        blockingOverlays: [
+            '[class*="modal"]',
+            '[class*="overlay"]'
+        ],
+        domStableTimeout: 5000,
+        maxWaitForElements: 10000,
+        dismissOverlaysBeforeExtract: true
+    }
+];
+
 export class OptimizedSnapshotExtractor {
     private lastSnapshot: OptimizedSnapshot | null = null;
+    private snapshotHistory: string[] = []; // Historial de hashes para detectar loops
+    private loadingHistory: { timestamp: number; isLoading: boolean }[] = []; // Historial de loading
+    private currentSiteProfile: SiteProfile | null = null;
+
+    /**
+     * Detecta el perfil del sitio basado en la URL
+     */
+    private detectSiteProfile(url: string): SiteProfile | null {
+        for (const profile of SITE_PROFILES) {
+            if (typeof profile.domain === 'string') {
+                if (url.includes(profile.domain)) return profile;
+            } else if (profile.domain.test(url)) {
+                return profile;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Cierra overlays bloqueantes automáticamente antes de extraer snapshot
+     */
+    private async dismissBlockingOverlays(page: Page): Promise<void> {
+        const profile = this.currentSiteProfile;
+        if (!profile?.dismissOverlaysBeforeExtract) return;
+
+        // Verificar si la página está cerrada
+        if (page.isClosed()) {
+            throw new Error('Target page, context or browser has been closed');
+        }
+
+        const selectors = [
+            ...(profile.blockingOverlays || []),
+            // Selectores genéricos comunes
+            'button[aria-label*="close" i]',
+            'button[aria-label*="cerrar" i]',
+            '[data-dismiss="modal"]',
+            '[data-toggle-class*="close"]',
+            '.cookie-banner button',
+            '[id*="cookie"] button:has-text("Accept"), [id*="cookie"] button:has-text("Aceptar")',
+            '[class*="gdpr"] button:has-text("Accept"), [class*="gdpr"] button:has-text("Aceptar")'
+        ];
+
+        for (const selector of selectors) {
+            // Verificar nuevamente antes de cada iteración
+            if (page.isClosed()) {
+                throw new Error('Target page, context or browser has been closed');
+            }
+
+            try {
+                const element = await page.locator(selector).first();
+                if (await element.isVisible({ timeout: 1000 }).catch(() => false)) {
+                    await element.click({ timeout: 1000 }).catch(() => {});
+                    try {
+                        await page.waitForTimeout(300); // Dar tiempo a que se cierre
+                    } catch (e: any) {
+                        const errorMessage = e?.message || '';
+                        if (errorMessage.includes('Target page, context or browser has been closed') ||
+                            errorMessage.includes('Target closed') ||
+                            errorMessage.includes('Browser closed') ||
+                            errorMessage.includes('context was destroyed')) {
+                            throw new Error('Target page, context or browser has been closed');
+                        }
+                    }
+                }
+            } catch (e: any) {
+                const errorMessage = e?.message || '';
+                if (errorMessage.includes('Target page, context or browser has been closed') ||
+                    errorMessage.includes('Target closed') ||
+                    errorMessage.includes('Browser closed') ||
+                    errorMessage.includes('context was destroyed')) {
+                    throw new Error('Target page, context or browser has been closed');
+                }
+                // Continuar con el siguiente selector para otros errores
+            }
+        }
+    }
+
+    /**
+     * Detecta si estamos en un loop de snapshots idénticos
+     */
+    isInSnapshotLoop(threshold: number = 3): boolean {
+        if (this.snapshotHistory.length < threshold) return false;
+        const lastN = this.snapshotHistory.slice(-threshold);
+        return lastN.every(hash => hash === lastN[0] && hash !== '');
+    }
+
+    /**
+     * Resetea el tracking de snapshots (útil después de login o navegación exitosa)
+     */
+    resetTracking(): void {
+        this.snapshotHistory = [];
+        this.loadingHistory = [];
+    }
+
+    /**
+     * Genera un hash simple del snapshot para detectar loops
+     */
+    private generateSnapshotHash(elements: OptimizedElement[]): string {
+        // Hash simple basado en cantidad y tipos de elementos
+        const summary = elements
+            .slice(0, 20) // Solo primeros 20 para performance
+            .map(e => `${e.tag}-${e.isButton ? 'btn' : ''}${e.isInput ? 'inp' : ''}${e.isLink ? 'lnk' : ''}`)
+            .join('|');
+        return `${elements.length}-${summary.length}`;
+    }
 
     /**
      * Espera a que el DOM deje de cambiar (MutationObserver) antes de tomar snapshot
      */
     async waitForDomStable(page: Page, silenceMs: number = 400, maxWaitMs: number = 5000): Promise<void> {
+        // Usar timeout del perfil si está disponible
+        const effectiveMaxWait = this.currentSiteProfile?.domStableTimeout || maxWaitMs;
         await page.evaluate(
             ({ silenceMs, maxWaitMs }) =>
                 new Promise<void>((resolve) => {
@@ -112,7 +356,7 @@ export class OptimizedSnapshotExtractor {
                         childList: true,
                         subtree: true,
                         attributes: true,
-                        attributeFilter: ['class', 'style', 'aria-expanded', 'hidden']
+                        attributeFilter: ['class', 'style', 'aria-expanded', 'hidden', 'data-toggle-class']
                     });
                     setTimeout(() => {
                         observer.disconnect();
@@ -121,20 +365,111 @@ export class OptimizedSnapshotExtractor {
                 }),
             { silenceMs, maxWaitMs }
         ).catch(() => { });
+        
+        // Para SPAs pesadas: esperar a que scripts externos terminen de cargar
+        // Verificar si hay scripts pendientes o elementos que se activan con JavaScript
+        await page.evaluate(() => {
+            return new Promise<void>((resolve) => {
+                // Esperar a que document.readyState sea 'complete'
+                if (document.readyState === 'complete') {
+                    // Verificar si hay scripts pendientes o elementos con data-toggle-class que aún no están inicializados
+                    const hasToggleElements = document.querySelectorAll('[data-toggle-class]').length > 0;
+                    const hasBookingComponents = document.querySelectorAll('[class*="js-booking"], [class*="booking-component"]').length > 0;
+                    
+                    if (hasToggleElements || hasBookingComponents) {
+                        // Dar tiempo adicional para que JavaScript inicialice estos componentes
+                        setTimeout(() => resolve(), 1000);
+                    } else {
+                        resolve();
+                    }
+                } else {
+                    // Esperar a que el documento termine de cargar
+                    const checkReady = () => {
+                        if (document.readyState === 'complete') {
+                            resolve();
+                        } else {
+                            setTimeout(checkReady, 100);
+                        }
+                    };
+                    checkReady();
+                }
+            });
+        }).catch(() => { });
     }
 
     /**
      * Extrae snapshot optimizado (con espera de DOM estable y soporte iframes)
      */
-    async extract(page: Page, options?: { skipDomStable?: boolean; includeFrames?: boolean }): Promise<OptimizedSnapshot> {
+    async extract(page: Page, options?: { skipDomStable?: boolean; includeFrames?: boolean; retryOnEmpty?: boolean }): Promise<OptimizedSnapshot> {
         const startTime = Date.now();
-        if (!options?.skipDomStable) {
-            await this.waitForDomStable(page);
+        const url = page.url();
+        
+        // Detectar perfil del sitio
+        this.currentSiteProfile = this.detectSiteProfile(url);
+        
+        // Verificar si la página está cerrada antes de cualquier operación
+        if (page.isClosed()) {
+            throw new Error('Target page, context or browser has been closed');
         }
 
-        const snapshot = await page.evaluate(() => {
+        // Cerrar overlays bloqueantes antes de extraer
+        if (this.currentSiteProfile?.dismissOverlaysBeforeExtract) {
+            try {
+                await this.dismissBlockingOverlays(page);
+            } catch (e: any) {
+                const errorMessage = e?.message || '';
+                if (errorMessage.includes('Target page, context or browser has been closed') ||
+                    errorMessage.includes('Target closed') ||
+                    errorMessage.includes('Browser closed') ||
+                    errorMessage.includes('context was destroyed')) {
+                    throw new Error('Target page, context or browser has been closed');
+                }
+                // Continuar si es otro tipo de error
+            }
+        }
+        
+        if (!options?.skipDomStable) {
+            try {
+                await this.waitForDomStable(page);
+            } catch (e: any) {
+                const errorMessage = e?.message || '';
+                if (errorMessage.includes('Target page, context or browser has been closed') ||
+                    errorMessage.includes('Target closed') ||
+                    errorMessage.includes('Browser closed') ||
+                    errorMessage.includes('context was destroyed')) {
+                    throw new Error('Target page, context or browser has been closed');
+                }
+                // Continuar si es otro tipo de error
+            }
+        }
+
+        // Verificar nuevamente si la página está cerrada antes de evaluar
+        if (page.isClosed()) {
+            throw new Error('Target page, context or browser has been closed');
+        }
+
+        // Inyectar perfil del sitio antes de evaluar
+        try {
+            await page.evaluate((profile: any) => {
+                (window as any).__SITE_PROFILE__ = profile || {};
+            }, this.currentSiteProfile);
+        } catch (e: any) {
+            const errorMessage = e?.message || '';
+            if (errorMessage.includes('Target page, context or browser has been closed') ||
+                errorMessage.includes('Target closed') ||
+                errorMessage.includes('Browser closed') ||
+                errorMessage.includes('context was destroyed')) {
+                throw new Error('Target page, context or browser has been closed');
+            }
+            throw e;
+        }
+        
+        let snapshot;
+        try {
+            snapshot = await page.evaluate(() => {
             // @ts-ignore - Shim for esbuild __name helper that might be injected (using window to avoid renaming)
             (window as any).__name = (target: any, value: any) => target;
+            
             const elements: any[] = [];
             let refCounter = 0;
 
@@ -149,6 +484,90 @@ export class OptimizedSnapshotExtractor {
                 if (parseFloat(style.opacity) === 0) return false;
                 const rect = el.getBoundingClientRect();
                 return rect.width > 0 && rect.height > 0;
+            };
+            
+            // === Función para detectar elementos que pueden activarse (aunque estén ocultos inicialmente) ===
+            const canBeActivated = (el: HTMLElement): boolean => {
+                // 1. Elementos con atributos data-* que indican comportamiento dinámico
+                if (el.hasAttribute('data-toggle-class') || 
+                    el.hasAttribute('data-toggle') ||
+                    el.hasAttribute('data-target') ||
+                    el.hasAttribute('data-clickoutside-container') ||
+                    el.hasAttribute('data-step') ||
+                    el.hasAttribute('data-wizard') ||
+                    el.hasAttribute('data-panel') ||
+                    el.hasAttribute('data-tab')) {
+                    return true;
+                }
+                
+                // 2. Elementos con atributos data-* que contienen valores (común en formularios multi-paso)
+                const dataAttrs = Array.from(el.attributes)
+                    .filter(attr => attr.name.startsWith('data-') && attr.name.length > 5)
+                    .map(attr => attr.name.toLowerCase());
+                const hasDataValue = dataAttrs.some(attr => 
+                    attr.includes('code') || 
+                    attr.includes('id') || 
+                    attr.includes('value') ||
+                    attr.includes('step') ||
+                    attr.includes('panel') ||
+                    attr.includes('field') ||
+                    attr.includes('option')
+                );
+                if (hasDataValue && (el.tagName === 'BUTTON' || el.tagName === 'INPUT' || el.hasAttribute('role') || el.tagName === 'LABEL')) {
+                    return true;
+                }
+                
+                // 3. Elementos dentro de componentes interactivos comunes (formularios multi-paso, wizards, tabs, etc.)
+                const className = el.className || '';
+                const classLower = typeof className === 'string' ? className.toLowerCase() : '';
+                
+                // Patrones comunes de componentes interactivos que pueden tener elementos ocultos inicialmente
+                const interactiveComponentPatterns = [
+                    'component',      // Componente genérico
+                    'step',           // Formularios multi-paso
+                    'wizard',         // Wizards
+                    'tab',            // Tabs
+                    'panel',          // Paneles
+                    'form-group',     // Grupos de formulario
+                    'fieldset',       // Fieldsets
+                    'accordion',      // Acordeones
+                    'collapse',       // Elementos colapsables
+                    'multi-step',     // Formularios multi-paso
+                    'stepper',        // Steppers
+                    'booking',        // Sistemas de reserva (genérico)
+                    'reservation',    // Reservaciones
+                    'checkout',       // Checkout
+                    'wizard-step',   // Pasos de wizard
+                    'form-step'       // Pasos de formulario
+                ];
+                
+                const hasInteractiveClass = interactiveComponentPatterns.some(pattern => classLower.includes(pattern));
+                if (hasInteractiveClass) {
+                    return true;
+                }
+                
+                // 4. Elementos con clase "disabled" que están dentro de componentes interactivos
+                if (classLower.includes('disabled')) {
+                    const parent = el.closest('form, [class*="component"], [class*="step"], [class*="wizard"], [class*="panel"], [class*="tab"], [class*="form"]');
+                    if (parent && (el.tagName === 'BUTTON' || el.tagName === 'INPUT' || el.hasAttribute('role') || el.tagName === 'LABEL')) {
+                        // Si tiene ID o atributos data-*, probablemente puede activarse
+                        if (el.hasAttribute('id') || el.hasAttribute('name') || dataAttrs.length > 0) {
+                            return true;
+                        }
+                    }
+                }
+                
+                // 5. Elementos dentro de contenedores con clases de componentes interactivos
+                const parent = el.closest('[class*="component"], [class*="step"], [class*="wizard"], [class*="panel"], [class*="tab"], [class*="form"], [class*="booking"], [class*="reservation"]');
+                if (parent) {
+                    // Si el elemento es interactivo (button, input, label, etc.) dentro de un componente, puede activarse
+                    if (el.tagName === 'BUTTON' || el.tagName === 'INPUT' || el.tagName === 'LABEL' || 
+                        el.hasAttribute('role') || el.hasAttribute('tabindex')) {
+                        return true;
+                    }
+                }
+                
+                return false;
             };
 
             // === Función para detectar elementos de solo accesibilidad (no clickeables) ===
@@ -271,13 +690,14 @@ export class OptimizedSnapshotExtractor {
             // === Selectores de elementos interactivos (orden de prioridad) ===
             const selectors = [
                 // Alta prioridad - controles de formulario
-                'button:not([disabled])',
-                'input:not([type="hidden"]):not([disabled])',
-                'select:not([disabled])',
-                'textarea:not([disabled])',
+                // NOTA: Incluimos elementos con clase "disabled" porque en SPAs pueden activarse después
+                'button',
+                'input:not([type="hidden"])',
+                'select',
+                'textarea',
                 // Media prioridad - elementos clickeables y partes de menú
                 'a[href]',
-                '[role="button"]:not([disabled])',
+                '[role="button"]',
                 '[role="link"]',
                 '[role="tab"]',
                 '[role="menuitem"]',
@@ -332,15 +752,23 @@ export class OptimizedSnapshotExtractor {
 
                 // Data Attributes (Common Frameworks)
                 '[data-toggle]',
+                '[data-toggle-class]', // Específico para páginas como pgaoceans4
                 '[data-target]',
                 '[data-dismiss]',
                 '[data-bs-toggle]',
                 '[data-action]',
                 '[data-click]',
+                '[data-clickoutside-container]', // Modales y popups
                 '[data-test]',
                 '[data-testid]',
                 '[data-qa]',
                 '[data-automation]',
+                // Elementos dentro de contenedores de booking (común en páginas de reservas)
+                '[class*="js-booking"]',
+                '[class*="booking-component"]',
+                '[class*="c-booking"]',
+                '[id*="booking"]',
+                '[id*="searchForm"]',
 
                 // Heurísticas específicas anteriores
                 '[class*="option"]',
@@ -404,7 +832,42 @@ export class OptimizedSnapshotExtractor {
 
             for (let i = 0; i < allInteractive.length; i++) {
                 const el = allInteractive[i];
-                if (!isVisible(el)) continue;
+                
+                // Para SPAs pesadas: detectar elementos que pueden activarse aunque estén ocultos inicialmente
+                const className = el.className || '';
+                const classLower = typeof className === 'string' ? className.toLowerCase() : '';
+                
+                // Detectar elementos que pueden activarse usando la función canBeActivated
+                const canBeActivated = (() => {
+                    // Atributos data-* que indican comportamiento dinámico
+                    if (el.hasAttribute('data-toggle-class') || 
+                        el.hasAttribute('data-toggle') ||
+                        el.hasAttribute('data-target') ||
+                        el.hasAttribute('data-clickoutside-container') ||
+                        el.hasAttribute('data-step') ||
+                        el.hasAttribute('data-wizard') ||
+                        el.hasAttribute('data-panel') ||
+                        el.hasAttribute('data-tab')) {
+                        return true;
+                    }
+                    
+                    // Clases comunes de componentes interactivos
+                    const interactivePatterns = ['component', 'step', 'wizard', 'tab', 'panel', 'form-group', 'booking', 'reservation', 'checkout'];
+                    if (interactivePatterns.some(pattern => classLower.includes(pattern))) {
+                        return true;
+                    }
+                    
+                    // Elementos dentro de componentes interactivos
+                    const parent = el.closest('[class*="component"], [class*="step"], [class*="wizard"], [class*="panel"], [class*="tab"], [class*="form"], [class*="booking"]');
+                    if (parent && (el.tagName === 'BUTTON' || el.tagName === 'INPUT' || el.tagName === 'LABEL' || el.hasAttribute('role'))) {
+                        return true;
+                    }
+                    
+                    return false;
+                })();
+                
+                // Si el elemento puede activarse pero está oculto, incluirlo de todas formas (se mostrará después)
+                if (!isVisible(el) && !canBeActivated) continue;
 
                 // Filtrar elementos de solo accesibilidad (screen-only, sr-only, etc.)
                 if (isAccessibilityOnly(el)) continue;
@@ -412,8 +875,11 @@ export class OptimizedSnapshotExtractor {
                 const rect = el.getBoundingClientRect();
 
                 // Solo elementos en viewport extendido (visible + 1 scroll)
-                if (rect.bottom < -viewportHeight || rect.top > viewportHeight * 2) continue;
-                if (rect.right < 0 || rect.left > viewportWidth) continue;
+                // EXCEPCIÓN: Si el elemento puede activarse (data-toggle-class, etc.), incluirlo aunque esté fuera del viewport
+                if (!canBeActivated) {
+                    if (rect.bottom < -viewportHeight || rect.top > viewportHeight * 2) continue;
+                    if (rect.right < 0 || rect.left > viewportWidth) continue;
+                }
 
                 const ref = 'e' + (++refCounter);
                 const tag = el.tagName.toLowerCase();
@@ -451,6 +917,14 @@ export class OptimizedSnapshotExtractor {
                 }
 
 
+                // Detectar si tiene clase "disabled" pero puede activarse (común en SPAs)
+                const hasDisabledClass = el.className && 
+                    typeof el.className === 'string' && 
+                    el.className.toLowerCase().includes('disabled');
+                const actuallyDisabled = (el as any).disabled === true || el.getAttribute('aria-disabled') === 'true';
+                // Si tiene clase disabled pero puede activarse, no marcarlo como disabled
+                const isDisabled = actuallyDisabled && !canBeActivated;
+                
                 const element: any = {
                     ref: ref,
                     tag: tag,
@@ -458,8 +932,8 @@ export class OptimizedSnapshotExtractor {
                     isButton: tag === 'button' || el.getAttribute('role') === 'button' || el.classList.contains('btn'),
                     isInput: ['input', 'select', 'textarea'].includes(tag),
                     isLink: tag === 'a' || el.getAttribute('role') === 'link',
-                    isDisabled: (el as any).disabled || el.getAttribute('aria-disabled') === 'true',
-                    isVisible: true,
+                    isDisabled: isDisabled,
+                    isVisible: canBeActivated ? true : isVisible(el), // Si puede activarse, marcarlo como visible aunque esté oculto
                     rect: {
                         x: Math.round(rect.x),
                         y: Math.round(rect.y),
@@ -693,16 +1167,64 @@ export class OptimizedSnapshotExtractor {
                 }
             }
 
-            // Detectar loading
-            const loadingSelectors = '.loading, .spinner, .loader, [class*="loading"], [aria-busy="true"]';
-            const loaders = document.querySelectorAll(loadingSelectors);
+            // Detectar loading mejorado con LoadingState detallado
+            const pageSiteProfile = (window as any).__SITE_PROFILE__ as SiteProfile | null;
+            const baseLoadingSelectors = '.loading, .spinner, .loader, [class*="loading"], [aria-busy="true"]';
+            const siteLoadingSelectors = (pageSiteProfile?.loadingSelectors || []) as string[];
+            const falsePositiveLoaders = (pageSiteProfile?.falsePositiveLoaders || []) as string[];
+            const allLoadingSelectors = [...baseLoadingSelectors.split(', '), ...siteLoadingSelectors].join(', ');
+            
+            const loaders = document.querySelectorAll(allLoadingSelectors);
+            const detectedLoaders: string[] = [];
+            let loadingType: 'spinner' | 'skeleton' | 'progress-bar' | 'overlay' | 'text' | undefined;
+            
             for (let i = 0; i < loaders.length; i++) {
                 const loader = loaders[i];
-                if (loader instanceof HTMLElement && isVisible(loader)) {
+                if (!(loader instanceof HTMLElement)) continue;
+                
+                // Verificar si es un falso positivo
+                const className = (loader.className || '').toLowerCase();
+                const isFalsePositive = falsePositiveLoaders.some((fp: string) => className.includes(fp.toLowerCase()));
+                if (isFalsePositive) continue;
+                
+                if (isVisible(loader)) {
+                    detectedLoaders.push(loader.tagName + (loader.className ? '.' + loader.className.split(' ')[0] : ''));
+                    
+                    // Determinar tipo de loading
+                    if (!loadingType) {
+                        if (className.includes('skeleton')) loadingType = 'skeleton';
+                        else if (className.includes('progress')) loadingType = 'progress-bar';
+                        else if (className.includes('overlay')) loadingType = 'overlay';
+                        else if (loader.textContent && loader.textContent.trim().length > 0) loadingType = 'text';
+                        else loadingType = 'spinner';
+                    }
                     pageState.isLoading = true;
-                    break;
                 }
             }
+            
+            // Crear LoadingState detallado
+            const now = Date.now();
+            const windowAny = window as any;
+            const lastLoadingState = windowAny.__LAST_LOADING_STATE__ || { isLoading: false, timestamp: now };
+            const consecutiveCount = pageState.isLoading && lastLoadingState.isLoading 
+                ? (windowAny.__CONSECUTIVE_LOADING_COUNT__ || 0) + 1 
+                : (pageState.isLoading ? 1 : 0);
+            
+            const loadingSince = pageState.isLoading && !lastLoadingState.isLoading ? now : (lastLoadingState.loadingSince || now);
+            const likelyFalsePositive = consecutiveCount >= 5 || (now - loadingSince > 30000); // 5 snapshots seguidos o 30s
+            
+            pageState.loadingState = {
+                isLoading: pageState.isLoading,
+                loadingType: loadingType,
+                consecutiveLoadingCount: consecutiveCount,
+                loadingSince: pageState.isLoading ? loadingSince : undefined,
+                likelyFalsePositive: likelyFalsePositive,
+                loaderSelectors: detectedLoaders.slice(0, 5)
+            };
+            
+            // Guardar estado para el próximo snapshot
+            windowAny.__LAST_LOADING_STATE__ = { isLoading: pageState.isLoading, timestamp: now, loadingSince };
+            windowAny.__CONSECUTIVE_LOADING_COUNT__ = consecutiveCount;
 
             // Detectar errores
             const errorSelectors = '.error, .alert-danger, .alert-error, [role="alert"], .invalid-feedback';
@@ -725,6 +1247,118 @@ export class OptimizedSnapshotExtractor {
                     method: activeForm.method || 'get'
                 };
             }
+            
+            // === Detectar PageContext (wizard, tabs, calendario, campos vacíos) ===
+            const pageContext: any = {};
+            
+            // Detectar wizard/steps
+            const wizardIndicators = document.querySelectorAll('[class*="wizard"], [class*="step"], [class*="stepper"], [aria-label*="step" i], [aria-label*="paso" i]');
+            if (wizardIndicators.length > 0) {
+                pageContext.isWizard = true;
+                // Intentar detectar paso actual y total
+                const stepText = Array.from(wizardIndicators).find(el => {
+                    const text = el.textContent?.toLowerCase() || '';
+                    return text.includes('step') || text.includes('paso') || /\d+\s*\/\s*\d+/.test(text);
+                })?.textContent || '';
+                const stepMatch = stepText.match(/(\d+)\s*\/\s*(\d+)/);
+                if (stepMatch) {
+                    pageContext.wizardStep = parseInt(stepMatch[1], 10);
+                    pageContext.wizardTotalSteps = parseInt(stepMatch[2], 10);
+                }
+            }
+            
+            // Detectar tabs
+            const tabs = document.querySelectorAll('[role="tablist"] [role="tab"][aria-selected="true"], .tab.active, [class*="tab"][class*="active"]');
+            if (tabs.length > 0) {
+                pageContext.hasTabs = true;
+                const activeTab = tabs[0];
+                pageContext.activeTab = activeTab.textContent?.trim() || activeTab.getAttribute('aria-label') || '';
+            }
+            
+            // Detectar calendario abierto
+            const calendarSelectors = [
+                '[role="grid"][aria-label*="calendar" i]',
+                '[role="grid"][aria-label*="calendario" i]',
+                '.calendar:not([style*="display: none"])',
+                '[class*="datepicker"]:not([style*="display: none"])',
+                '[class*="calendar"]:not([style*="display: none"])'
+            ];
+            let calendarOpen = false;
+            for (const selector of calendarSelectors) {
+                const calendar = document.querySelector(selector);
+                if (calendar instanceof HTMLElement && isVisible(calendar)) {
+                    calendarOpen = true;
+                    break;
+                }
+            }
+            if (calendarOpen || elements.some(e => e.isCalendarDay)) {
+                pageContext.hasCalendar = true;
+                pageContext.calendarOpen = calendarOpen;
+            }
+            
+            // Detectar campos requeridos sin llenar
+            // NOTA: No podemos usar :has-text() porque no es un selector CSS válido
+            // En su lugar, seleccionamos todos los campos requeridos y verificamos manualmente
+            const requiredInputs = document.querySelectorAll('input[required], textarea[required], select[required]');
+            const emptyRequiredFields: string[] = [];
+            requiredInputs.forEach((input: Element) => {
+                if (!(input instanceof HTMLElement)) return;
+                
+                // Verificar si realmente está vacío
+                let isEmpty = false;
+                if (input instanceof HTMLInputElement) {
+                    // Para inputs, verificar si no tiene value o está vacío
+                    isEmpty = !input.value || input.value.trim() === '';
+                } else if (input instanceof HTMLTextAreaElement) {
+                    isEmpty = !input.value || input.value.trim() === '';
+                } else if (input instanceof HTMLSelectElement) {
+                    // Para selects, verificar si no tiene opción seleccionada o es la primera (default)
+                    isEmpty = !input.value || input.selectedIndex === 0;
+                }
+                
+                if (isEmpty) {
+                    const name = input.getAttribute('name') || input.getAttribute('id') || '';
+                    const label = input.id ? (document.querySelector(`label[for="${input.id}"]`)?.textContent?.trim() || '') : '';
+                    const ariaLabel = input.getAttribute('aria-label') || '';
+                    const placeholder = input.getAttribute('placeholder') || '';
+                    const fieldLabel = label || ariaLabel || placeholder || name;
+                    
+                    if (fieldLabel && !emptyRequiredFields.includes(fieldLabel)) {
+                        emptyRequiredFields.push(fieldLabel);
+                    }
+                }
+            });
+            if (emptyRequiredFields.length > 0) {
+                pageContext.emptyRequiredFields = emptyRequiredFields;
+            }
+            
+            // Detectar formulario y sus campos
+            const forms = document.querySelectorAll('form');
+            if (forms.length > 0) {
+                pageContext.hasForm = true;
+                const formFields: { name: string; type: string; required: boolean; filled: boolean }[] = [];
+                forms[0].querySelectorAll('input, select, textarea').forEach((field: Element) => {
+                    if (!(field instanceof HTMLElement)) return;
+                    const name = field.getAttribute('name') || field.getAttribute('id') || '';
+                    const type = field.getAttribute('type') || field.tagName.toLowerCase();
+                    const required = field.hasAttribute('required') || field.getAttribute('aria-required') === 'true';
+                    let filled = false;
+                    if (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) {
+                        filled = !!(field.value && field.value.trim() !== '');
+                    } else if (field instanceof HTMLSelectElement) {
+                        filled = field.selectedIndex > 0 && !!field.value;
+                    }
+                    if (name) {
+                        formFields.push({ name, type, required, filled });
+                    }
+                });
+                if (formFields.length > 0) {
+                    pageContext.formFields = formFields;
+                }
+            }
+            
+            // Guardar PageContext en window para que esté disponible en el return
+            (window as any).__PAGE_CONTEXT__ = Object.keys(pageContext).length > 0 ? pageContext : undefined;
 
             // === Contenido de texto (headings, párrafos, tablas, listas, semántica) ===
             const pageContent: any = {
@@ -785,34 +1419,111 @@ export class OptimizedSnapshotExtractor {
             });
 
             // === Detección de framework/tecnología ===
-            const win = window as any;
+            const windowForFramework = window as any;
             let framework: 'react' | 'vue' | 'angular' | 'jquery' | 'unknown' | undefined;
             let isSpa = false;
-            if (win.__REACT_DEVTOOLS_GLOBAL_HOOK__ || win.React || win.__REACT__) {
+            if (windowForFramework.__REACT_DEVTOOLS_GLOBAL_HOOK__ || windowForFramework.React || windowForFramework.__REACT__) {
                 framework = 'react';
                 isSpa = true;
-            } else if (win.__VUE__ || win.Vue) {
+            } else if (windowForFramework.__VUE__ || windowForFramework.Vue) {
                 framework = 'vue';
                 isSpa = true;
-            } else if (win.ng || win.getAllAngularRootElements) {
+            } else if (windowForFramework.ng || windowForFramework.getAllAngularRootElements) {
                 framework = 'angular';
                 isSpa = true;
-            } else if (win.jQuery || win.$) {
+            } else if (windowForFramework.jQuery || windowForFramework.$) {
                 framework = 'jquery';
             }
             let hasShadowDom = false;
+            const shadowElements: any[] = [];
+            
+            // Función recursiva para extraer elementos de Shadow DOM
+            const extractShadowElements = (shadowRoot: ShadowRoot, depth: number = 0, maxDepth: number = 3): void => {
+                if (depth > maxDepth) return;
+                
+                try {
+                    const shadowSelectors = 'button, input:not([type="hidden"]), select, textarea, a[href], [role="button"], [role="link"]';
+                    const shadowNodes = shadowRoot.querySelectorAll(shadowSelectors);
+                    
+                    for (let i = 0; i < shadowNodes.length && shadowElements.length < 50; i++) {
+                        const el = shadowNodes[i];
+                        if (!(el instanceof HTMLElement)) continue;
+                        
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width === 0 || rect.height === 0) continue;
+                        
+                        const style = getComputedStyle(el);
+                        if (style.display === 'none' || style.visibility === 'hidden') continue;
+                        
+                        const tag = el.tagName.toLowerCase();
+                        let text = '';
+                        if (el instanceof HTMLInputElement || el instanceof HTMLSelectElement) {
+                            text = (el as HTMLInputElement).placeholder || el.title || '';
+                        } else {
+                            text = (el.innerText || '').trim().slice(0, 100);
+                        }
+                        
+                        shadowElements.push({
+                            ref: 'sd' + depth + '-' + (shadowElements.length + 1),
+                            tag: tag,
+                            text: text,
+                            isButton: tag === 'button' || el.getAttribute('role') === 'button',
+                            isInput: ['input', 'select', 'textarea'].includes(tag),
+                            isLink: tag === 'a' || el.getAttribute('role') === 'link',
+                            isDisabled: (el as any).disabled || el.getAttribute('aria-disabled') === 'true',
+                            isVisible: true,
+                            rect: {
+                                x: Math.round(rect.x),
+                                y: Math.round(rect.y),
+                                w: Math.round(rect.width),
+                                h: Math.round(rect.height)
+                            },
+                            ariaLabel: el.getAttribute('aria-label') || undefined,
+                            role: el.getAttribute('role') || undefined,
+                            testId: el.getAttribute('data-testid') || el.getAttribute('data-test') || undefined,
+                            id: el.id || undefined,
+                            name: el.getAttribute('name') || undefined,
+                            className: el.className || undefined
+                        });
+                    }
+                    
+                    // Buscar shadow roots anidados
+                    const nestedShadows = shadowRoot.querySelectorAll('*');
+                    for (let j = 0; j < nestedShadows.length && depth < maxDepth; j++) {
+                        const nested = nestedShadows[j];
+                        if ((nested as any).shadowRoot) {
+                            extractShadowElements((nested as any).shadowRoot, depth + 1, maxDepth);
+                        }
+                    }
+                } catch (e) {
+                    // Shadow DOM puede ser cerrado o inaccesible
+                }
+            };
+            
+            // Detectar y extraer Shadow DOM
             try {
                 const all = document.body?.querySelectorAll('*');
                 if (all) {
                     for (let i = 0; i < Math.min(all.length, 200); i++) {
-                        if ((all[i] as any).shadowRoot) {
+                        const el = all[i] as any;
+                        if (el.shadowRoot) {
                             hasShadowDom = true;
-                            break;
+                            extractShadowElements(el.shadowRoot, 0, 3);
+                            if (shadowElements.length >= 50) break; // Límite de elementos shadow
                         }
                     }
                 }
+                
+                // Agregar elementos shadow al array principal
+                if (shadowElements.length > 0) {
+                    elements.push(...shadowElements);
+                }
             } catch (_) { }
 
+            // Generar hash del snapshot antes de retornar
+            const snapshotHash = `${elements.length}-${elements.slice(0, 10).map(e => e.ref).join('')}`;
+            (window as any).__SNAPSHOT_HASH__ = snapshotHash;
+            
             return {
                 url: window.location.href,
                 title: document.title,
@@ -820,13 +1531,25 @@ export class OptimizedSnapshotExtractor {
                 pageContent,
                 framework: { isSpa, framework, hasShadowDom },
                 pageState: pageState,
+                pageContext: (window as any).__PAGE_CONTEXT__ || undefined,
                 meta: {
                     timestamp: Date.now(),
                     elementCount: elements.length,
-                    extractionTimeMs: 0
+                    extractionTimeMs: 0,
+                    snapshotHash: snapshotHash
                 }
             };
-        });
+        }, this.currentSiteProfile || {});
+        } catch (e: any) {
+            const errorMessage = e?.message || '';
+            if (errorMessage.includes('Target page, context or browser has been closed') ||
+                errorMessage.includes('Target closed') ||
+                errorMessage.includes('Browser closed') ||
+                errorMessage.includes('context was destroyed')) {
+                throw new Error('Target page, context or browser has been closed');
+            }
+            throw e;
+        }
 
         // === Elementos en iframes (Stripe, reCAPTCHA, embeds) ===
         if (options?.includeFrames !== false) {
@@ -866,20 +1589,33 @@ export class OptimizedSnapshotExtractor {
                                 isDisabled: (el as any).disabled || el.getAttribute('aria-disabled') === 'true',
                                 isVisible: true,
                                 rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
-                                frameRef: true
+                                frameRef: true,
+                                // Metadata adicional para iframes
+                                ariaLabel: el.getAttribute('aria-label') || undefined,
+                                role: el.getAttribute('role') || undefined,
+                                testId: el.getAttribute('data-testid') || el.getAttribute('data-test') || undefined,
+                                id: el.id || undefined,
+                                name: el.getAttribute('name') || undefined,
+                                className: el.className || undefined,
+                                type: el.getAttribute('type') || undefined,
+                                placeholder: el.getAttribute('placeholder') || undefined
                             });
                         });
                         return out;
                     });
                     const prefix = 'f' + frameIndex + '-';
-                    for (const el of frameElements) {
+                    // Limitar elementos por iframe para evitar snapshots enormes
+                    const maxElementsPerFrame = 30;
+                    for (let i = 0; i < Math.min(frameElements.length, maxElementsPerFrame); i++) {
+                        const el = frameElements[i];
                         snapshot.elements.push({
                             ...el,
                             ref: prefix + el.ref,
-                            testId: (el.testId || '') ? el.testId : undefined,
+                            testId: el.testId || undefined,
                         });
                     }
                     frameIndex++;
+                    if (frameIndex >= 5) break; // Máximo 5 iframes para evitar demoras
                 } catch (_) {
                     // iframe puede ser cross-origin y no accesible
                 }
@@ -889,7 +1625,29 @@ export class OptimizedSnapshotExtractor {
 
         // Agregar tiempo de extracción real
         snapshot.meta.extractionTimeMs = Date.now() - startTime;
-
+        
+        // Generar hash del snapshot para detectar loops
+        snapshot.meta.snapshotHash = this.generateSnapshotHash(snapshot.elements);
+        this.snapshotHistory.push(snapshot.meta.snapshotHash);
+        if (this.snapshotHistory.length > 10) {
+            this.snapshotHistory.shift(); // Mantener solo los últimos 10
+        }
+        
+        // Adaptive retry: si hay muy pocos elementos, hacer scroll y reintentar
+        if (snapshot.elements.length < 5 && options?.retryOnEmpty !== false && !options?.skipDomStable) {
+            try {
+                await page.evaluate(() => window.scrollBy(0, 500));
+                await page.waitForTimeout(1000);
+                // Reintentar una vez
+                const retrySnapshot = await this.extract(page, { ...options, retryOnEmpty: false });
+                if (retrySnapshot.elements.length > snapshot.elements.length) {
+                    return retrySnapshot;
+                }
+            } catch (_) {
+                // Si falla el retry, continuar con el snapshot original
+            }
+        }
+        
         this.lastSnapshot = snapshot;
         return snapshot;
     }

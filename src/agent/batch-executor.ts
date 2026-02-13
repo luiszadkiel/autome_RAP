@@ -158,8 +158,8 @@ export class BatchActionExecutor {
 
         // Acciones que no requieren elemento: saltar resolución si ref es inválido
         const actionsWithoutElement = ['wait', 'scroll', 'done', 'back'];
-        const skipElementResolution = actionsWithoutElement.includes(action.action) && 
-                                     (action.ref === 'page' || !snapshot.elements.find(e => e.ref === action.ref));
+        const skipElementResolution = actionsWithoutElement.includes(action.action) &&
+            (action.ref === 'page' || !snapshot.elements.find(e => e.ref === action.ref));
 
         // Resolver elemento si aplica
         let locator;
@@ -258,7 +258,13 @@ export class BatchActionExecutor {
                             for (const selector of closeSelectors) {
                                 try {
                                     const closeBtn = page.locator(selector).first();
-                                    if (await closeBtn.isVisible({ timeout: 500 })) {
+                                    const visible = await closeBtn.evaluate((el: HTMLElement) => {
+                                        const style = window.getComputedStyle(el);
+                                        return style.display !== 'none' &&
+                                            style.visibility !== 'hidden' &&
+                                            style.opacity !== '0';
+                                    });
+                                    if (visible) {
                                         await closeBtn.click({ timeout: 1000 });
                                         await page.waitForTimeout(300);
                                         break;
@@ -370,7 +376,7 @@ export class BatchActionExecutor {
                         console.log('   ⌨️ Login: escrito con pressSequentially (SPA compatible)');
 
                         // Disparar eventos manualmente para SPAs
-                        await locator.evaluate((el) => {
+                        await locator.evaluate((el: any) => {
                             el.dispatchEvent(new Event('input', { bubbles: true }));
                             el.dispatchEvent(new Event('change', { bubbles: true }));
                         }).catch(() => { });
@@ -382,7 +388,7 @@ export class BatchActionExecutor {
                             console.log('   ⚠️ Valor no coincide, reintentando con fill()...');
                             await locator.clear();
                             await locator.fill(valueToType);
-                            await locator.evaluate((el) => {
+                            await locator.evaluate((el: any) => {
                                 el.dispatchEvent(new Event('input', { bubbles: true }));
                                 el.dispatchEvent(new Event('change', { bubbles: true }));
                             }).catch(() => { });
@@ -401,7 +407,7 @@ export class BatchActionExecutor {
                         await locator.clear().catch(() => { });
                         await locator.fill(valueToType);
                         // Disparar eventos también en fallback
-                        await locator.evaluate((el) => {
+                        await locator.evaluate((el: any) => {
                             el.dispatchEvent(new Event('input', { bubbles: true }));
                             el.dispatchEvent(new Event('change', { bubbles: true }));
                         }).catch(() => { });
@@ -417,7 +423,7 @@ export class BatchActionExecutor {
                     try {
                         await locator.fill(valueToType);
                         // Disparar eventos para SPAs
-                        await locator.evaluate((el) => {
+                        await locator.evaluate((el: any) => {
                             el.dispatchEvent(new Event('input', { bubbles: true }));
                             el.dispatchEvent(new Event('change', { bubbles: true }));
                         }).catch(() => { });
@@ -432,7 +438,7 @@ export class BatchActionExecutor {
                                 await locator.clear().catch(() => { });
                                 await locator.pressSequentially(valueToType, { delay: 30 });
                                 // Disparar eventos también en fallback
-                                await locator.evaluate((el) => {
+                                await locator.evaluate((el: any) => {
                                     el.dispatchEvent(new Event('input', { bubbles: true }));
                                     el.dispatchEvent(new Event('change', { bubbles: true }));
                                 }).catch(() => { });
